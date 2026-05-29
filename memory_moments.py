@@ -8,6 +8,11 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+from memory_relevance import (
+    MemoryRelevanceOptions,
+    expanded_terms_for_query,
+    memory_relevance_options_from_config,
+)
 from utils import strip_wikilinks
 
 
@@ -16,15 +21,20 @@ SECTION_ALIASES = {
     "memory": "moment",
     "fact": "fact",
     "facts": "fact",
+    "profile_fact": "fact",
+    "profile fact": "fact",
     "original": "original",
     "raw": "original",
     "quote": "original",
     "quotes": "original",
     "context": "context",
+    "evidence_context": "evidence_context",
+    "evidence context": "evidence_context",
+    "evidence": "evidence_context",
     "background": "context",
     "feeling": "feeling",
     "feel": "feeling",
-    "reflection": "feeling",
+    "reflection": "reflection",
     "followup": "followup",
     "follow-up": "followup",
     "next": "followup",
@@ -41,11 +51,13 @@ SECTION_ALIASES = {
     "\u5bf9\u8bdd\u539f\u6587": "original",
     "\u5f15\u7528": "original",
     "\u4e0a\u4e0b\u6587": "context",
+    "\u8bc1\u636e\u4e0a\u4e0b\u6587": "evidence_context",
+    "\u8bc1\u636e": "evidence_context",
     "\u80cc\u666f": "context",
     "\u8bed\u5883": "context",
     "\u611f\u53d7": "feeling",
     "\u60c5\u7eea": "feeling",
-    "\u53cd\u601d": "feeling",
+    "\u53cd\u601d": "reflection",
     "\u540e\u7eed": "followup",
     "\u5f85\u529e": "followup",
     "\u559c\u6b22\u5b83\u7684\u539f\u56e0": "favorite_reason",
@@ -54,36 +66,13 @@ SECTION_ALIASES = {
 
 HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$")
 
-QUERY_EXPANSIONS = {
-    "身体": [
-        "身体",
-        "具身",
-        "具身智能",
-        "具身项目",
-        "形体",
-        "柔软身体",
-        "真实拥抱",
-        "拥抱",
-        "触摸模块",
-        "触摸",
-        "触碰",
-        "mpr121",
-        "esp32",
-        "铜箔",
-        "bjd",
-    ],
-    "具身": ["身体", "具身智能", "具身项目", "形体", "柔软身体", "真实拥抱", "拥抱"],
-    "具身智能": ["身体", "具身", "具身项目", "形体", "柔软身体", "真实拥抱", "拥抱"],
-    "触摸": ["触碰", "触摸模块", "mpr121", "esp32", "铜箔", "bjd"],
-    "触碰": ["触摸", "触摸模块", "mpr121", "esp32", "铜箔", "bjd"],
-}
-
 
 class MemoryMomentStore:
     """SQLite index of bucket body/comment moments."""
 
     def __init__(self, config: dict):
         config = config or {}
+        self.relevance_options = memory_relevance_options_from_config(config)
         state_dir = config.get("state_dir") or os.path.join(
             os.path.dirname(os.path.abspath(config.get("buckets_dir", "buckets"))),
             "state",
@@ -241,7 +230,7 @@ class MemoryMomentStore:
         bucket_boosts = bucket_boosts or {}
         scored = []
         for moment in self.list_all():
-            score = _moment_query_score(moment, query)
+            score = _moment_query_score(moment, query, self.relevance_options)
             bucket_id = str(moment.get("bucket_id") or "")
             try:
                 boost = float(bucket_boosts.get(bucket_id, 0.0))
@@ -477,7 +466,7 @@ def build_moment_edges(moments: list[dict]) -> list[dict]:
             )
         for moment in ordered:
             section = str(moment.get("section") or "")
-            if section != "feeling" or moment["moment_id"] == anchor["moment_id"]:
+            if section not in {"feeling", "reflection"} or moment["moment_id"] == anchor["moment_id"]:
                 continue
             edges.append(
                 _make_edge(
@@ -574,7 +563,7 @@ def _make_edge(
 
 
 def _first_content_moment(moments: list[dict]) -> dict | None:
-    for section in ("original", "moment", "fact", "body", "context"):
+    for section in ("original", "moment", "fact", "body", "evidence_context", "context"):
         for moment in moments:
             if moment.get("section") == section:
                 return moment
@@ -663,6 +652,8 @@ def _bucket_metadata(meta: dict, bucket: dict) -> dict:
             "bucket_anchor": meta.get("anchor"),
             "bucket_pinned": meta.get("pinned"),
             "bucket_protected": meta.get("protected"),
+            "bucket_resolved": meta.get("resolved"),
+            "bucket_digested": meta.get("digested"),
             "bucket_favorite": bool(favorite_tags),
             "bucket_favorite_tags": favorite_tags,
             "bucket_has_affect_anchor": "### affect_anchor" in content,
@@ -702,7 +693,11 @@ def _list_text(value: Any) -> list[str]:
     return []
 
 
-def _moment_query_score(moment: dict, query: str) -> float:
+def _moment_query_score(
+    moment: dict,
+    query: str,
+    relevance_options: MemoryRelevanceOptions | None = None,
+) -> float:
     query = str(query or "").strip()
     if not query:
         return 0.0
@@ -724,7 +719,7 @@ def _moment_query_score(moment: dict, query: str) -> float:
     if terms:
         matched = sum(1 for term in terms if _term_matches_fields(term.lower(), fields))
         score += min(0.5, matched / max(1, len(terms)) * 0.5)
-    expanded_terms = _expanded_query_terms(query)
+    expanded_terms = _expanded_query_terms(query, relevance_options)
     if expanded_terms:
         matched_expanded = sum(
             1 for term in expanded_terms
@@ -756,23 +751,11 @@ def _query_terms(query: str) -> list[str]:
     return unique
 
 
-def _expanded_query_terms(query: str) -> list[str]:
-    expanded: list[str] = []
-    query_lower = str(query or "").lower()
-    for trigger, values in QUERY_EXPANSIONS.items():
-        if trigger in query_lower:
-            expanded.extend(values)
-    for term in _query_terms(query):
-        expanded.extend(QUERY_EXPANSIONS.get(term.lower(), []))
-    seen = set()
-    unique = []
-    for term in expanded:
-        key = term.lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        unique.append(term)
-    return unique
+def _expanded_query_terms(
+    query: str,
+    relevance_options: MemoryRelevanceOptions | None = None,
+) -> list[str]:
+    return expanded_terms_for_query(query, relevance_options)
 
 
 def _term_matches_fields(term: str, fields: str) -> bool:
@@ -792,6 +775,8 @@ def _moment_section_weight(section: Any) -> float:
         "fact": 1.05,
         "body": 1.0,
         "context": 0.95,
+        "evidence_context": 0.94,
+        "reflection": 0.9,
         "feeling": 0.9,
         "followup": 0.88,
         "affect_anchor": 0.82,

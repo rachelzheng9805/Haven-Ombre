@@ -1,6 +1,8 @@
 import os
+import json
 import sqlite3
 from datetime import datetime
+from typing import Any
 
 
 class GatewayStateStore:
@@ -46,6 +48,23 @@ class GatewayStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_injected_lookup
             ON injected_buckets (session_id, bucket_id, injected_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS injection_debug (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                round_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_injection_debug_lookup
+            ON injection_debug (session_id, id DESC)
             """
         )
         conn.commit()
@@ -130,6 +149,91 @@ class GatewayStateStore:
             return datetime.fromisoformat(str(row["injected_at"]))
         except ValueError:
             return None
+
+    def record_injection_debug(
+        self,
+        session_id: str,
+        round_id: int,
+        payload: dict[str, Any],
+        *,
+        max_entries: int = 80,
+    ) -> int:
+        created_at = datetime.now().isoformat(timespec="seconds")
+        body = json.dumps(payload, ensure_ascii=False)
+        conn = self._connect()
+        cursor = conn.execute(
+            """
+            INSERT INTO injection_debug (session_id, round_id, created_at, payload_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (session_id, int(round_id), created_at, body),
+        )
+        debug_id = int(cursor.lastrowid or 0)
+        conn.execute(
+            """
+            DELETE FROM injection_debug
+            WHERE id NOT IN (
+                SELECT id FROM injection_debug ORDER BY id DESC LIMIT ?
+            )
+            """,
+            (max(1, int(max_entries)),),
+        )
+        conn.commit()
+        conn.close()
+        return debug_id
+
+    def list_injection_debug(
+        self,
+        *,
+        session_id: str = "",
+        limit: int = 20,
+        include_context: bool = True,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(100, int(limit)))
+        conn = self._connect()
+        if session_id:
+            rows = conn.execute(
+                """
+                SELECT id, session_id, round_id, created_at, payload_json
+                FROM injection_debug
+                WHERE session_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (session_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, session_id, round_id, created_at, payload_json
+                FROM injection_debug
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        conn.close()
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except json.JSONDecodeError:
+                payload = {"raw": row["payload_json"]}
+            if isinstance(payload, dict) and not include_context:
+                payload = dict(payload)
+                payload.pop("stable_context", None)
+                payload.pop("dynamic_context", None)
+            items.append(
+                {
+                    "id": row["id"],
+                    "session_id": row["session_id"],
+                    "round_id": row["round_id"],
+                    "created_at": row["created_at"],
+                    "payload": payload,
+                }
+            )
+        return items
 
     def get_cooldown_multiplier(
         self,

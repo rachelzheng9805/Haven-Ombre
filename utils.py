@@ -84,6 +84,24 @@ def load_config(config_path: str = None) -> dict:
             "salience_min": 0.2,
             "salience_max": 1.3,
         },
+        "memory_relevance": {
+            "aliases": {
+                "relationship_identity": [
+                    "human-ai relationship",
+                    "ai relationship",
+                    "人机恋",
+                    "人机关系",
+                    "AI伴侣",
+                ],
+                "intimacy": ["intimacy", "sexual", "nsfw", "亲密", "情欲", "欲望"],
+                "embodiment": ["embodiment", "physical body", "具身", "身体", "形体"],
+                "hardware_protocol": ["hardware", "protocol", "ble", "esp32", "mpr121", "硬件", "协议"],
+                "communication_action": ["email", "mail", "message", "发邮件", "邮件", "发消息"],
+                "old_or_resolved": ["legacy", "deprecated", "resolved", "旧版", "废弃", "已解决"],
+            },
+            "blocked_facets": [],
+            "section_hints": {},
+        },
         "gateway": {
             "host": "0.0.0.0",
             "port": 8010,

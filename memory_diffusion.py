@@ -3,6 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from memory_relevance import (
+    MemoryRelevanceOptions,
+    memory_relevance_options_from_config,
+    relevance_multiplier,
+    should_suppress_candidate,
+)
+
 
 DEFAULT_HOP_DECAYS = (0.8, 0.6, 0.4, 0.25)
 DEFAULT_RELATION_TYPE_WEIGHTS = {
@@ -16,6 +23,7 @@ DEFAULT_RELATION_TYPE_WEIGHTS = {
     "next_context": 0.85,
     "previous_context": 0.75,
     "reflects_on": 0.8,
+    "evidenced_by": 1.0,
     "relates_to": 0.7,
     "contradicts": 0.45,
     "blocks": 0.45,
@@ -35,6 +43,7 @@ class DiffusionOptions:
     fallback_decay: float = 0.55
     include_incoming: bool = True
     max_paths_per_hit: int = 3
+    relevance: MemoryRelevanceOptions = field(default_factory=memory_relevance_options_from_config)
     relation_type_weights: dict[str, float] = field(
         default_factory=lambda: dict(DEFAULT_RELATION_TYPE_WEIGHTS)
     )
@@ -101,6 +110,7 @@ def diffusion_options_from_config(config: dict | None) -> DiffusionOptions:
         fallback_decay=_float_between(cfg.get("decay", 0.55), 0.55, 0.0, 1.0),
         include_incoming=_bool_value(cfg.get("include_incoming", True)),
         max_paths_per_hit=_int_between(cfg.get("max_paths_per_hit", 3), 3, 1, 10),
+        relevance=memory_relevance_options_from_config(config),
         relation_type_weights=relation_weights,
     )
 
@@ -113,6 +123,7 @@ def diffuse_memory(
     exclude_ids: set[str] | None = None,
     node_salience: NodeSalienceFn | None = None,
     node_resonance: NodeResonanceFn | None = None,
+    query_text: str = "",
 ) -> list[DiffusionHit]:
     options = options or DiffusionOptions()
     if not options.enabled or options.top_k <= 0 or options.max_hops <= 0:
@@ -160,12 +171,15 @@ def diffuse_memory(
                 target = bucket_map.get(target_id)
                 if not target or _is_feel_bucket(target):
                     continue
+                query_multiplier = relevance_multiplier(query_text, target, options.relevance)
+                if query_multiplier <= 0:
+                    continue
 
                 relation_weight = options.relation_type_weights.get(
                     step.relation_type,
                     options.relation_type_weights.get("relates_to", 0.7),
                 )
-                next_strength = state.path_strength * step.confidence * relation_weight
+                next_strength = state.path_strength * step.confidence * relation_weight * query_multiplier
                 activation = (
                     next_strength
                     * hop_weight
@@ -265,6 +279,19 @@ def format_diffusion_trace(
 
 def path_has_caution(path: DiffusionPath) -> bool:
     return any(step.relation_type in {"contradicts", "blocks"} for step in path.steps)
+
+
+def should_suppress_context_candidate(
+    query: str,
+    node: dict,
+    config: dict | MemoryRelevanceOptions | None = None,
+) -> bool:
+    options = (
+        config
+        if isinstance(config, MemoryRelevanceOptions)
+        else memory_relevance_options_from_config(config if isinstance(config, dict) else None)
+    )
+    return should_suppress_candidate(query, node, options)
 
 
 def _build_adjacency(edges: list[dict], include_incoming: bool) -> dict[str, list[DiffusionStep]]:

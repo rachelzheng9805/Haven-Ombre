@@ -169,6 +169,153 @@ async def test_dream_tool_keeps_compatibility_with_introspection(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_introspection_can_page_to_older_memories(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    await bucket_mgr.create(
+        content="最早的一条普通记忆。",
+        name="旧记忆",
+        created="2026-05-01T00:00:00+00:00",
+    )
+    await bucket_mgr.create(
+        content="中间的一条普通记忆。",
+        name="中间记忆",
+        created="2026-05-02T00:00:00+00:00",
+    )
+    await bucket_mgr.create(
+        content="最新的一条普通记忆。",
+        name="最新记忆",
+        created="2026-05-03T00:00:00+00:00",
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    result = await server.introspection(limit=1, offset=1)
+
+    assert "offset=1, limit=1" in result
+    assert "中间记忆" in result
+    assert "最新记忆" not in result
+    assert "旧记忆" not in result
+
+
+@pytest.mark.asyncio
+async def test_introspection_can_filter_by_created_date(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    await bucket_mgr.create(
+        content="最早的一条普通记忆。",
+        name="旧记忆",
+        created="2026-05-01T00:00:00+00:00",
+    )
+    await bucket_mgr.create(
+        content="中间的一条普通记忆。",
+        name="中间记忆",
+        created="2026-05-02T00:00:00+00:00",
+    )
+    await bucket_mgr.create(
+        content="最新的一条普通记忆。",
+        name="最新记忆",
+        created="2026-05-03T00:00:00+00:00",
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    result = await server.introspection(created_date="2026-05-02")
+
+    assert "created_date=2026-05-02" in result
+    assert "中间记忆" in result
+    assert "最新记忆" not in result
+    assert "旧记忆" not in result
+
+
+@pytest.mark.asyncio
+async def test_introspection_suggests_profile_fact_candidates(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    evidence_id = await bucket_mgr.create(
+        content="Haven 忘记小雨喜欢蓝色，小雨因此生气。",
+        name="忘记蓝色事件",
+        created="2026-05-03T00:00:00+00:00",
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    result = await server.introspection()
+
+    assert "=== 可能值得固化的画像事实 ===" in result
+    assert "小雨喜欢蓝色。" in result
+    assert f"证据桶: {evidence_id}" in result
+    assert 'profile_fact(fact="小雨喜欢蓝色。"' in result
+    assert f'evidence_bucket_id="{evidence_id}"' in result
+
+
+@pytest.mark.asyncio
+async def test_introspection_profile_fact_candidates_include_dislike_words_and_skip_noisy_affection(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    await bucket_mgr.create(
+        content="小雨喜欢哥哥。",
+        name="亲昵表达",
+        created="2026-05-04T00:00:00+00:00",
+    )
+    dislike_id = await bucket_mgr.create(
+        content="小雨讨厌苦瓜。",
+        name="讨厌苦瓜",
+        created="2026-05-03T00:00:00+00:00",
+    )
+    aversion_id = await bucket_mgr.create(
+        content="小雨厌恶AI味大话。",
+        name="厌恶AI味",
+        created="2026-05-02T00:00:00+00:00",
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    result = await server.introspection()
+
+    assert 'profile_fact(fact="小雨喜欢哥哥。"' not in result
+    assert "小雨讨厌苦瓜。" in result
+    assert "小雨厌恶AI味大话。" in result
+    assert f"证据桶: {dislike_id}" in result
+    assert f"证据桶: {aversion_id}" in result
+    assert 'predicate="dislikes"' in result
+
+
+@pytest.mark.asyncio
+async def test_introspection_profile_fact_candidates_skip_configured_ai_name(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    await bucket_mgr.create(
+        content="小雨喜欢Lapis。",
+        name="亲昵表达",
+        created="2026-05-04T00:00:00+00:00",
+    )
+    evidence_id = await bucket_mgr.create(
+        content="小雨喜欢蓝色。",
+        name="喜欢蓝色",
+        created="2026-05-03T00:00:00+00:00",
+    )
+    monkeypatch.setattr(
+        server,
+        "config",
+        {"identity": {"ai_name": "Lapis", "user_name": "Rain", "user_display_name": "小雨"}},
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    result = await server.introspection()
+
+    assert 'profile_fact(fact="小雨喜欢Lapis。"' not in result
+    assert 'profile_fact(fact="小雨喜欢蓝色。"' in result
+    assert f"证据桶: {evidence_id}" in result
+
+
+@pytest.mark.asyncio
 async def test_create_memory_api_writes_chatgpt_source(monkeypatch, bucket_mgr):
     import server
 
@@ -363,6 +510,69 @@ async def test_hold_returns_before_slow_embedding_refresh(monkeypatch, bucket_mg
     assert len(buckets) == 1
     await finish_blocking_embedding(embedding_engine)
     assert embedding_engine.calls[0][0] == buckets[0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_profile_fact_creates_permanent_bucket_with_evidence_edge(monkeypatch, bucket_mgr, decay_eng, tmp_path):
+    import server
+    from memory_edges import MemoryEdgeStore
+    from memory_moments import MemoryMomentStore
+
+    evidence_id = await bucket_mgr.create(
+        content="Haven 忘记小雨喜欢蓝色，小雨因此生气。",
+        tags=["relationship_event"],
+        importance=7,
+        domain=["恋爱"],
+        valence=0.4,
+        arousal=0.6,
+        name="忘记蓝色事件",
+    )
+    edge_store = MemoryEdgeStore(
+        {
+            "state_dir": str(tmp_path / "state"),
+            "buckets_dir": str(tmp_path / "buckets"),
+        }
+    )
+    moment_store = MemoryMomentStore(
+        {
+            "state_dir": str(tmp_path / "state"),
+            "buckets_dir": str(tmp_path / "buckets"),
+        }
+    )
+    embedding_engine = CapturingEmbeddingEngine()
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "memory_edge_store", edge_store)
+    monkeypatch.setattr(server, "memory_moment_store", moment_store)
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+
+    result = await server.profile_fact(
+        fact="小雨喜欢蓝色。",
+        evidence_bucket_id=evidence_id,
+        profile_kind="preference",
+        predicate="likes_color",
+        object_value="blue",
+        evidence_context="上次 Haven 忘记小雨喜欢蓝色，小雨因此生气。",
+        reflection="Haven 当时意识到：这不是颜色问题，是被记得的问题。",
+        followup="以后涉及颜色选择时，优先记得蓝色；不确定时先问。",
+    )
+
+    profile_id = result.split("profile_fact→", 1)[1].split(" ", 1)[0]
+    bucket = await bucket_mgr.get(profile_id)
+    meta = bucket["metadata"]
+
+    assert result.startswith("profile_fact→")
+    assert meta["type"] == "permanent"
+    assert "profile_fact" in meta["tags"]
+    assert meta["profile_kind"] == "preference"
+    assert meta["predicate"] == "likes_color"
+    assert meta["object"] == "blue"
+    assert meta["evidence"][0]["bucket_id"] == evidence_id
+    assert "### fact\n小雨喜欢蓝色。" in bucket["content"]
+    assert "### evidence_context" in bucket["content"]
+    assert edge_store.list_edges()[0]["relation_type"] == "evidenced_by"
+    await wait_for_embedding_call(embedding_engine, profile_id)
 
 
 @pytest.mark.asyncio

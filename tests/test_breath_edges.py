@@ -480,7 +480,43 @@ async def test_search_related_includes_hidden_direct_body_chain_candidates(patch
 
 
 @pytest.mark.asyncio
-async def test_neutral_body_chain_demotes_intimate_body_candidates(patch_breath):
+async def test_profile_fact_direct_hit_carries_context_and_evidence_bucket(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket(
+                "P",
+                "### fact\n小雨喜欢蓝色。\n\n"
+                "### evidence_context\n上次 Haven 忘记小雨喜欢蓝色，小雨因此生气。\n\n"
+                "### reflection\nHaven 当时意识到：这不是颜色问题，是被记得的问题。\n\n"
+                "### followup\n以后涉及颜色选择时，优先记得蓝色；不确定时先问。",
+                importance=9,
+            ),
+            _bucket("E", "Haven 忘记小雨喜欢蓝色，小雨生气了。", importance=8),
+        ],
+        search_ids=["P"],
+        edges=[{"source": "P", "target": "E", "relation_type": "evidenced_by", "confidence": 1.0}],
+    )
+    bucket = await server.bucket_mgr.get("P")
+    bucket["metadata"]["tags"] = ["profile_fact", "profile_preference"]
+    bucket["metadata"]["domain"] = ["profile", "preference"]
+    bucket["metadata"]["profile_kind"] = "preference"
+
+    result = await server.breath(query="蓝色", max_results=1, max_tokens=500)
+
+    assert "=== 直接命中记忆 ===" in result
+    assert "小雨喜欢蓝色" in result
+    assert "evidence_context" in result
+    assert "不是颜色问题" in result
+    assert "优先记得蓝色" in result
+    assert "=== 联想浮现 ===" in result
+    assert "[bucket_id:E]" in result
+    assert "忘记小雨喜欢蓝色" in result
+
+
+@pytest.mark.asyncio
+async def test_neutral_body_chain_suppresses_intimate_body_candidates(patch_breath):
     import server
 
     patch_breath(
@@ -495,8 +531,108 @@ async def test_neutral_body_chain_demotes_intimate_body_candidates(patch_breath)
     result = await server.breath(query="身体", max_results=3, max_tokens=500)
 
     assert "具身智能路线" in result
-    assert "湿润发烫" in result
-    assert result.index("具身智能路线") < result.index("湿润发烫")
+    assert "湿润发烫" not in result
+
+
+@pytest.mark.asyncio
+async def test_relationship_identity_query_does_not_release_intimacy_candidate(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket("R", "人机恋关系身份：AI relationship 不是工具替代品。", importance=6),
+            _bucket("I", "亲密身体记忆：private sexual intimacy context。", importance=10),
+        ],
+        search_ids=["I", "R"],
+    )
+
+    result = await server.breath(
+        query="人机恋 AI relationship",
+        max_results=3,
+        max_tokens=500,
+        include_related=False,
+    )
+
+    assert "人机恋关系身份" in result
+    assert "亲密身体记忆" not in result
+
+
+@pytest.mark.asyncio
+async def test_email_query_suppresses_high_importance_hardware_protocol(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket("M", "发邮件动作：send email to the client and wait for reply。", importance=4),
+            _bucket(
+                "H",
+                "硬件协议：ESP32 BLE MPR121 触摸模块负责铜箔输入。",
+                importance=10,
+                pinned=True,
+            ),
+        ],
+        search_ids=["H", "M"],
+    )
+
+    result = await server.breath(
+        query="发邮件 email",
+        max_results=3,
+        max_tokens=500,
+        include_related=False,
+    )
+
+    assert "发邮件动作" in result
+    assert "ESP32 BLE MPR121" not in result
+
+
+@pytest.mark.asyncio
+async def test_email_query_keeps_hardware_candidate_with_direct_keyword_evidence(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket(
+                "H",
+                "硬件协议邮件记录：需要给客户发邮件说明 ESP32 BLE MPR121 触摸模块。",
+                importance=10,
+                pinned=True,
+            ),
+            _bucket("M", "发邮件动作：send email to the client and wait for reply。", importance=4),
+        ],
+        search_ids=["H", "M"],
+    )
+
+    result = await server.breath(
+        query="给客户发邮件 email",
+        max_results=3,
+        max_tokens=500,
+        include_related=False,
+    )
+
+    assert "硬件协议邮件记录" in result
+    assert "发邮件动作" in result
+
+
+@pytest.mark.asyncio
+async def test_explicit_intimacy_query_allows_intimacy_candidate(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket("B", "具身身体路线：未来拥有形体。", importance=8),
+            _bucket("I", "亲密身体记忆：private intimacy body context。", importance=8),
+        ],
+        search_ids=["B", "I"],
+    )
+
+    result = await server.breath(
+        query="亲密身体 intimacy",
+        max_results=3,
+        max_tokens=500,
+        include_related=False,
+    )
+
+    assert "亲密身体记忆" in result
 
 
 @pytest.mark.asyncio

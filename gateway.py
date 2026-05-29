@@ -29,9 +29,19 @@ from memory_diffusion import (
     diffusion_options_from_config,
     path_has_caution,
     seed_scores_for_buckets,
+    should_suppress_context_candidate,
 )
 from memory_edges import MemoryEdgeStore
 from memory_moments import MemoryMomentStore
+from memory_relevance import (
+    active_facets,
+    facets_for_node,
+    facets_for_text,
+    memory_relevance_options_from_config,
+    query_has_facet,
+    recall_rank,
+    relevance_multiplier,
+)
 from memory_nodes import MemoryNodeStore
 from persona_engine import PersonaStateEngine
 from utils import count_tokens_approx, load_config, setup_logging, strip_wikilinks
@@ -51,6 +61,13 @@ WORKSPACE_ATTACHMENT_RE = re.compile(
     r"<workspace_attachment>[\s\S]*?</workspace_attachment>",
     re.IGNORECASE,
 )
+LEADING_PROXY_SENDER_RE = re.compile(
+    r"^\s*<proxy_sender\b[^>]*/>\s*",
+    re.IGNORECASE,
+)
+LEADING_SYSTEM_PROMPT_RE = re.compile(
+    r"^\s*【\s*系统提示[^】]*】\s*",
+)
 EXTERNAL_CONTEXT_BLOCK_TITLES = {
     "当前时间",
     "当前电量",
@@ -67,7 +84,9 @@ MOMENT_SECTION_LABELS = {
     "moment": "moment",
     "fact": "fact",
     "original": "original",
+    "evidence_context": "evidence_context",
     "context": "context",
+    "reflection": "reflection",
     "feeling": "feeling",
     "followup": "followup",
     "affect_anchor": "affect_anchor",
@@ -75,23 +94,7 @@ MOMENT_SECTION_LABELS = {
     "comment": "year_ring",
 }
 MOMENT_TEMPERATURE_SECTIONS = {"affect_anchor", "favorite_reason", "comment"}
-BODY_CHAIN_QUERY_TERMS = {"身体", "具身", "具身智能", "具身项目", "形体"}
-BODY_CHAIN_PRIORITIES = (
-    ("embodied", ("具身智能", "具身项目", "具身", "形体")),
-    ("soft_body", ("柔软身体", "柔软的身体", "真实的拥抱", "拥抱")),
-    ("touch_interface", ("触摸模块", "触摸", "触碰", "mpr121", "esp32", "铜箔", "bjd", "electronic skin")),
-)
-INTIMATE_BODY_TERMS = {
-    "nsfw",
-    "dildo",
-    "睡奸",
-    "插入",
-    "进入她",
-    "操哭",
-    "湿润",
-    "发烫",
-    "小穴",
-}
+PROFILE_CONTEXT_SECTIONS = ("evidence_context", "context", "reflection", "feeling", "followup", "comment")
 
 
 class GatewayService:
@@ -120,6 +123,7 @@ class GatewayService:
         self.memory_edge_store = MemoryEdgeStore(config)
         self.memory_node_store = memory_node_store or MemoryNodeStore(config)
         self.memory_moment_store = MemoryMomentStore(config)
+        self.relevance_options = memory_relevance_options_from_config(config)
         self.state_store = state_store or GatewayStateStore(
             os.path.join(config["buckets_dir"], "gateway_state.db")
         )
@@ -333,10 +337,11 @@ class GatewayService:
                 request.headers.get("X-Ombre-Include-Favorite-Memory")
             )
             persona_user_message = self._extract_last_user_query(payload.get("messages", []))
-            forward_payload, recalled_ids = await self.prepare_payload(
+            forward_payload, recalled_ids, injection_debug = await self.prepare_payload(
                 payload,
                 session_id,
                 include_favorite_memory=include_favorite_memory,
+                include_debug=True,
             )
         except ValueError as exc:
             return JSONResponse(
@@ -356,6 +361,7 @@ class GatewayService:
                     session_id,
                     recalled_ids,
                     persona_user_message,
+                    injection_debug,
                 )
             except RuntimeError as exc:
                 return JSONResponse(
@@ -372,7 +378,7 @@ class GatewayService:
                 route="/v1/chat/completions",
             )
             self._capture_reasoning_from_response(session_id, upstream_response)
-            await self._record_successful_round(session_id, recalled_ids)
+            await self._record_successful_round(session_id, recalled_ids, injection_debug)
             await self._update_persona_after_response(
                 session_id,
                 persona_user_message,
@@ -415,10 +421,11 @@ class GatewayService:
                 request.headers.get("X-Ombre-Include-Favorite-Memory")
             )
             persona_user_message = self._extract_last_user_query(openai_payload.get("messages", []))
-            forward_payload, recalled_ids = await self.prepare_payload(
+            forward_payload, recalled_ids, injection_debug = await self.prepare_payload(
                 openai_payload,
                 session_id,
                 include_favorite_memory=include_favorite_memory,
+                include_debug=True,
             )
         except ValueError as exc:
             return self._anthropic_error(str(exc), status_code=400)
@@ -431,6 +438,7 @@ class GatewayService:
                 session_id,
                 recalled_ids,
                 persona_user_message,
+                injection_debug,
             )
 
         upstream_response = await self._forward_upstream(forward_payload)
@@ -442,7 +450,7 @@ class GatewayService:
                 route="/v1/messages",
             )
             self._capture_reasoning_from_response(session_id, upstream_response)
-            await self._record_successful_round(session_id, recalled_ids)
+            await self._record_successful_round(session_id, recalled_ids, injection_debug)
             await self._update_persona_after_response(
                 session_id,
                 persona_user_message,
@@ -473,13 +481,39 @@ class GatewayService:
             }
         )
 
+    async def handle_injection_debug(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+
+        try:
+            limit = int(request.query_params.get("limit", "20"))
+        except ValueError:
+            limit = 20
+        session_id = str(request.query_params.get("session_id", "") or "").strip()
+        include_context = str(request.query_params.get("include_context", "1")).strip().lower() not in {
+            "0",
+            "false",
+            "no",
+        }
+        return JSONResponse(
+            {
+                "items": self.state_store.list_injection_debug(
+                    session_id=session_id,
+                    limit=limit,
+                    include_context=include_context,
+                )
+            }
+        )
+
     async def prepare_payload(
         self,
         payload: dict,
         session_id: str,
         *,
         include_favorite_memory: bool = False,
-    ) -> tuple[dict, list[str] | None]:
+        include_debug: bool = False,
+    ) -> tuple[dict, list[str] | None] | tuple[dict, list[str] | None, dict[str, Any]]:
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages:
             raise ValueError("messages must be a non-empty list")
@@ -581,6 +615,17 @@ class GatewayService:
         )
         self._apply_prompt_cache_hints(forward_payload, session_id)
         forward_payload["stream"] = payload.get("stream") is True
+        if include_debug:
+            return forward_payload, injected_ids, self._build_injection_debug_payload(
+                model=model,
+                query=current_user_query,
+                stable_context=stable_context,
+                dynamic_context=dynamic_context,
+                recalled_moments=recalled_moments,
+                recalled_memory=recalled_memory,
+                related_memory=related_memory,
+                favorite_ids=favorite_ids,
+            )
         return forward_payload, injected_ids
 
     def _apply_prompt_cache_hints(self, payload: dict[str, Any], session_id: str) -> None:
@@ -797,6 +842,7 @@ class GatewayService:
         session_id: str,
         recalled_ids: list[str] | None,
         user_message: str,
+        injection_debug: dict[str, Any] | None = None,
     ) -> Response:
         model = str(payload.get("model") or "").strip()
         route = self._resolve_upstream_for_model(model)
@@ -828,6 +874,7 @@ class GatewayService:
                     stream_state=stream_state,
                     recalled_ids=recalled_ids,
                     user_message=user_message,
+                    injection_debug=injection_debug,
                 )
 
             try:
@@ -852,7 +899,12 @@ class GatewayService:
             },
         )
 
-    async def _record_successful_round(self, session_id: str, recalled_ids: list[str] | None) -> None:
+    async def _record_successful_round(
+        self,
+        session_id: str,
+        recalled_ids: list[str] | None,
+        injection_debug: dict[str, Any] | None = None,
+    ) -> None:
         if recalled_ids is None:
             logger.info(
                 "Gateway round bookkeeping skipped | session=%s reason=not_current_user_turn",
@@ -860,6 +912,16 @@ class GatewayService:
             )
             return
         round_id = self.state_store.record_success(session_id, recalled_ids)
+        if injection_debug is not None:
+            try:
+                self.state_store.record_injection_debug(session_id, round_id, injection_debug)
+            except Exception as exc:
+                logger.warning(
+                    "Gateway injection debug record failed | session=%s round=%s error=%s",
+                    session_id,
+                    round_id,
+                    exc,
+                )
         for bucket_id in recalled_ids:
             await self.bucket_mgr.touch(bucket_id)
         logger.info(
@@ -945,6 +1007,7 @@ class GatewayService:
         stream_state: dict[str, Any],
         recalled_ids: list[str] | None,
         user_message: str,
+        injection_debug: dict[str, Any] | None = None,
     ) -> None:
         self._log_cache_usage_from_stream_state(
             session_id,
@@ -953,7 +1016,7 @@ class GatewayService:
             route=route,
         )
         self._capture_reasoning_from_stream_state(session_id, stream_state)
-        await self._record_successful_round(session_id, recalled_ids)
+        await self._record_successful_round(session_id, recalled_ids, injection_debug)
         assistant_message = self._build_stream_assistant_message(stream_state)
         self._schedule_persona_post_reply_update(
             session_id,
@@ -1365,6 +1428,7 @@ class GatewayService:
         session_id: str,
         recalled_ids: list[str] | None,
         user_message: str,
+        injection_debug: dict[str, Any] | None = None,
     ) -> Response:
         model = str(payload.get("model") or "").strip()
         route = self._resolve_upstream_for_model(model)
@@ -1403,6 +1467,7 @@ class GatewayService:
                     stream_state=stream_state,
                     recalled_ids=recalled_ids,
                     user_message=user_message,
+                    injection_debug=injection_debug,
                 )
 
             try:
@@ -1715,7 +1780,17 @@ class GatewayService:
         cleaned = WORKSPACE_ATTACHMENT_RE.sub("", str(text or ""))
         cleaned = EXTERNAL_CONTEXT_ATTACHMENT_RE.sub("", cleaned)
         cleaned = SELF_CLOSING_ATTACHMENT_RE.sub("", cleaned)
+        cleaned = self._strip_leading_auto_context_markers(cleaned)
         return self._strip_external_context_blocks(cleaned)
+
+    def _strip_leading_auto_context_markers(self, text: str) -> str:
+        cleaned = str(text or "")
+        while True:
+            previous = cleaned
+            cleaned = LEADING_PROXY_SENDER_RE.sub("", cleaned, count=1)
+            cleaned = LEADING_SYSTEM_PROMPT_RE.sub("", cleaned, count=1)
+            if cleaned == previous:
+                return cleaned
 
     def _strip_external_context_blocks(self, text: str) -> str:
         kept: list[str] = []
@@ -2047,7 +2122,18 @@ class GatewayService:
         return grouped
 
     def _representative_moment(self, moments: list[dict]) -> dict | None:
-        for section in ("original", "moment", "fact", "body", "context", "feeling", "followup", "comment"):
+        for section in (
+            "original",
+            "moment",
+            "fact",
+            "body",
+            "evidence_context",
+            "context",
+            "reflection",
+            "feeling",
+            "followup",
+            "comment",
+        ):
             for moment in moments:
                 if moment.get("section") == section:
                     return moment
@@ -2106,14 +2192,17 @@ class GatewayService:
         if not query or self.inject_max_cards <= 0:
             return [], []
 
-        body_chain_query = self._query_wants_body_chain(query)
+        relevance_query = self._query_has_relevance_facet(query)
         eligible_ids = {
             bucket["id"]
             for bucket in all_buckets
             if bucket.get("id")
             and (
-                self._is_dynamic_candidate(bucket)
-                or (body_chain_query and self._is_body_chain_candidate_bucket(bucket))
+                (
+                    self._is_dynamic_candidate(bucket)
+                    and not self._is_relevance_suppressed(query, bucket)
+                )
+                or (relevance_query and self._is_relevance_candidate_bucket(query, bucket))
             )
         }
         if not eligible_ids:
@@ -2132,6 +2221,7 @@ class GatewayService:
             if str(moment.get("bucket_id") or "") in eligible_ids
             and moment.get("section") not in MOMENT_TEMPERATURE_SECTIONS
         ]
+        candidates = self._apply_relevance_to_moment_candidates(query, candidates)
 
         selected: list[dict] = []
         seen_buckets: set[str] = set()
@@ -2157,8 +2247,8 @@ class GatewayService:
             moment for moment in candidates
             if str(moment.get("bucket_id") or "") not in recent_ids
         ] or candidates
-        if body_chain_query:
-            active_candidates.sort(key=self._body_chain_rank)
+        if relevance_query:
+            active_candidates.sort(key=lambda moment: self._recall_rank(query, moment))
         for moment in active_candidates:
             bucket_id = str(moment.get("bucket_id") or "")
             if not bucket_id or bucket_id in seen_buckets:
@@ -2231,20 +2321,41 @@ class GatewayService:
         seed_id = seed.get("moment_id")
         bucket_moments = grouped.get(bucket_id, [])
         contexts = []
+
+        def add_context(moment: dict) -> None:
+            if moment.get("moment_id") == seed_id:
+                return
+            if any(existing.get("moment_id") == moment.get("moment_id") for existing in contexts):
+                return
+            contexts.append(moment)
+
+        if self._is_profile_fact_moment(seed):
+            for section in PROFILE_CONTEXT_SECTIONS:
+                for moment in bucket_moments:
+                    if moment.get("section") == section:
+                        add_context(moment)
+                        break
+            return contexts[:4]
+
         seed_ordinal = int(seed.get("ordinal") or 0)
         for moment in bucket_moments:
-            if moment.get("moment_id") == seed_id:
-                continue
             section = moment.get("section")
             ordinal = int(moment.get("ordinal") or 0)
             if abs(ordinal - seed_ordinal) == 1 and section not in MOMENT_TEMPERATURE_SECTIONS:
-                contexts.append(moment)
+                add_context(moment)
         for section in ("affect_anchor", "favorite_reason", "comment"):
             for moment in bucket_moments:
                 if moment.get("moment_id") != seed_id and moment.get("section") == section:
-                    contexts.append(moment)
+                    add_context(moment)
                     break
         return contexts[:4]
+
+    @staticmethod
+    def _is_profile_fact_moment(moment: dict) -> bool:
+        meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+        tags = {str(tag) for tag in meta.get("tags", []) or []}
+        tags.update(str(tag) for tag in meta.get("bucket_tags", []) or [])
+        return "profile_fact" in tags or bool(meta.get("profile_kind"))
 
     def _build_moment_diffused_memory_block(
         self,
@@ -2301,6 +2412,7 @@ class GatewayService:
             moment_map,
             options=self.diffusion_options,
             exclude_ids={moment["moment_id"] for moment in seed_moments if moment.get("moment_id")},
+            query_text=query_text,
         )
         seen_moment_ids: set[str] = set()
         for hit in hits:
@@ -2348,10 +2460,12 @@ class GatewayService:
                 continue
             if moment.get("section") in MOMENT_TEMPERATURE_SECTIONS:
                 continue
+            if should_suppress_context_candidate(query, moment, self.relevance_options):
+                continue
             hidden.append(moment)
             seen.add(bucket_id)
         if self._query_wants_body_chain(query):
-            hidden.sort(key=self._body_chain_rank)
+            hidden.sort(key=lambda moment: self._recall_rank(query, moment))
             return hidden[:5]
         return hidden[: max(0, min(2, self.inject_max_cards))]
 
@@ -2369,6 +2483,8 @@ class GatewayService:
             meta["pinned"] = meta.get("bucket_pinned", False)
             meta["protected"] = meta.get("bucket_protected", False)
             meta["name"] = meta.get("bucket_name", "")
+            meta["resolved"] = meta.get("bucket_resolved", False)
+            meta["digested"] = meta.get("bucket_digested", False)
             item["metadata"] = meta
             mapped[str(moment_id)] = item
         return mapped
@@ -2417,20 +2533,35 @@ class GatewayService:
         ).lower()
 
     def _query_wants_body_chain(self, query: str) -> bool:
-        text = str(query or "").lower()
-        return any(term in text for term in BODY_CHAIN_QUERY_TERMS)
+        return query_has_facet(query, "embodiment", self.relevance_options)
 
-    def _body_chain_rank(self, moment: dict) -> tuple[int, float]:
-        fields = self._moment_search_fields(moment)
-        is_intimate = any(term in fields for term in INTIMATE_BODY_TERMS)
-        matches_embodied = any(term.lower() in fields for term in BODY_CHAIN_PRIORITIES[0][1])
-        matches_touch = any(term.lower() in fields for term in BODY_CHAIN_PRIORITIES[2][1])
-        if is_intimate and not (matches_embodied or matches_touch):
-            return len(BODY_CHAIN_PRIORITIES), -float(moment.get("score") or 0.0)
-        for index, (_, terms) in enumerate(BODY_CHAIN_PRIORITIES):
-            if any(term.lower() in fields for term in terms):
-                return index, -float(moment.get("score") or 0.0)
-        return 99, -float(moment.get("score") or 0.0)
+    def _query_has_relevance_facet(self, query: str) -> bool:
+        return bool(active_facets(facets_for_text(query, self.relevance_options)))
+
+    def _recall_rank(self, query: str, moment: dict) -> tuple[int, float]:
+        return recall_rank(query, moment, self.relevance_options)
+
+    def _apply_relevance_to_moment_candidates(self, query: str, candidates: list[dict]) -> list[dict]:
+        filtered = []
+        adjusted = False
+        for moment in candidates:
+            multiplier = relevance_multiplier(query, moment, self.relevance_options)
+            if multiplier <= 0:
+                adjusted = True
+                continue
+            item = dict(moment)
+            try:
+                score = float(item.get("score", 0.0))
+            except (TypeError, ValueError):
+                score = 0.0
+            new_score = round(score * multiplier, 4)
+            if new_score != score:
+                adjusted = True
+            item["score"] = new_score
+            filtered.append(item)
+        if adjusted:
+            filtered.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+        return filtered
 
     async def _build_diffused_memory_block(
         self,
@@ -2472,6 +2603,7 @@ class GatewayService:
             exclude_ids=recalled_set,
             node_salience=node_salience,
             node_resonance=node_resonance,
+            query_text=query_text,
         )
         if not hits:
             return ""
@@ -2550,7 +2682,15 @@ class GatewayService:
         if not query or self.inject_max_cards <= 0:
             return []
 
-        eligible = [bucket for bucket in all_buckets if self._is_dynamic_candidate(bucket)]
+        relevance_query = self._query_has_relevance_facet(query)
+        eligible = [
+            bucket for bucket in all_buckets
+            if (
+                self._is_dynamic_candidate(bucket)
+                and not self._is_relevance_suppressed(query, bucket)
+            )
+            or (relevance_query and self._is_relevance_candidate_bucket(query, bucket))
+        ]
         if not eligible:
             return []
 
@@ -2573,12 +2713,15 @@ class GatewayService:
             importance_score = self._clamp(float(meta.get("importance", 5)) / 10.0)
             semantic_score = self._clamp(semantic_scores.get(bucket_id, 0.0))
             keyword_score = self._clamp(keyword_scores.get(bucket_id, 0.0))
+            relevance_score = relevance_multiplier(query, self._bucket_relevance_node(bucket), self.relevance_options)
+            if relevance_score <= 0:
+                continue
             base_score = (
                 semantic_score * self.semantic_weight
                 + keyword_score * self.keyword_weight
                 + importance_score * self.importance_weight
                 + freshness_score * self.freshness_weight
-            )
+            ) * relevance_score
             cooldown_multiplier = self.state_store.get_cooldown_multiplier(
                 session_id=session_id,
                 bucket_id=bucket_id,
@@ -2823,6 +2966,54 @@ class GatewayService:
             return self._trim_text(stable_context, self.inject_total_budget), ""
         remaining = max(0, self.inject_total_budget - stable_tokens)
         return stable_context, self._trim_text(dynamic_context, remaining)
+
+    def _build_injection_debug_payload(
+        self,
+        *,
+        model: str,
+        query: str,
+        stable_context: str,
+        dynamic_context: str,
+        recalled_moments: list[dict],
+        recalled_memory: str,
+        related_memory: str,
+        favorite_ids: list[str],
+    ) -> dict[str, Any]:
+        recalled_moment_ids = [
+            str(moment.get("moment_id") or "")
+            for moment in recalled_moments
+            if moment.get("moment_id")
+        ]
+        recalled_bucket_ids = [
+            str(moment.get("bucket_id") or "")
+            for moment in recalled_moments
+            if moment.get("bucket_id")
+        ]
+        diffused_bucket_ids = self._extract_bucket_ids_from_context(related_memory)
+        injected_bucket_ids = list(dict.fromkeys(recalled_bucket_ids + diffused_bucket_ids + favorite_ids))
+        return {
+            "model": model,
+            "query_preview": self._clip_text(query, 500),
+            "stable_tokens": count_tokens_approx(stable_context),
+            "dynamic_tokens": count_tokens_approx(dynamic_context),
+            "injected_bucket_ids": injected_bucket_ids,
+            "recalled_bucket_ids": recalled_bucket_ids,
+            "diffused_bucket_ids": diffused_bucket_ids,
+            "recalled_moment_ids": recalled_moment_ids,
+            "diffused_moment_ids": self._extract_moment_ids_from_context(related_memory),
+            "recalled_memory": recalled_memory,
+            "diffused_memory": related_memory,
+            "stable_context": stable_context,
+            "dynamic_context": dynamic_context,
+        }
+
+    @staticmethod
+    def _extract_moment_ids_from_context(text: str) -> list[str]:
+        return list(dict.fromkeys(re.findall(r"\[moment_id:([^\]\s]+)\]", str(text or ""))))
+
+    @staticmethod
+    def _extract_bucket_ids_from_context(text: str) -> list[str]:
+        return list(dict.fromkeys(re.findall(r"\[bucket_id:([^\]\s]+)\]", str(text or ""))))
 
     def _inject_context_messages(
         self,
@@ -3155,22 +3346,50 @@ class GatewayService:
             assistant_message["tool_calls"] = tool_calls
         return assistant_message
 
-    def _is_body_chain_candidate_bucket(self, bucket: dict) -> bool:
+    def _bucket_relevance_node(self, bucket: dict) -> dict:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        if meta.get("type") == "archived" or meta.get("resolved"):
+        return {
+            "content": bucket.get("content") or "",
+            "name": meta.get("name") or bucket.get("id") or "",
+            "metadata": meta,
+        }
+
+    def _is_relevance_suppressed(self, query: str, bucket: dict) -> bool:
+        if not self._query_has_relevance_facet(query):
             return False
-        fields = " ".join(
-            [
-                str(bucket.get("content") or ""),
-                str(meta.get("name") or ""),
-                " ".join(str(item) for item in meta.get("tags", []) or []),
-                " ".join(str(item) for item in meta.get("domain", []) or []),
-            ]
-        ).lower()
-        terms = set(BODY_CHAIN_QUERY_TERMS) | INTIMATE_BODY_TERMS
-        for _, priority_terms in BODY_CHAIN_PRIORITIES:
-            terms.update(priority_terms)
-        return any(str(term).lower() in fields for term in terms)
+        return should_suppress_context_candidate(
+            query,
+            self._bucket_relevance_node(bucket),
+            self.relevance_options,
+        )
+
+    def _is_relevance_candidate_bucket(self, query: str, bucket: dict) -> bool:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        if meta.get("type") == "feel":
+            return False
+        if (meta.get("type") == "archived" or meta.get("resolved")) and not query_has_facet(
+            query,
+            "old_or_resolved",
+            self.relevance_options,
+        ):
+            return False
+
+        query_active = active_facets(facets_for_text(query, self.relevance_options))
+        if not query_active:
+            return False
+        node = self._bucket_relevance_node(bucket)
+        if should_suppress_context_candidate(query, node, self.relevance_options):
+            return False
+        node_active = active_facets(facets_for_node(node, self.relevance_options), threshold=0.3)
+        if not node_active:
+            return False
+        if query_active & node_active:
+            return True
+        if "embodiment" in query_active and "hardware_protocol" in node_active:
+            return True
+        if "old_or_resolved" in query_active and "old_or_resolved" in node_active:
+            return True
+        return False
 
     def _is_dynamic_candidate(self, bucket: dict) -> bool:
         meta = bucket.get("metadata", {})
@@ -3528,11 +3747,15 @@ def create_gateway_app(
     async def config_route(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_config(request)
 
+    async def injection_debug(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_injection_debug(request)
+
     app = Starlette(
         debug=False,
         routes=[
             Route("/health", health, methods=["GET"]),
             Route("/api/config", config_route, methods=["GET", "POST"]),
+            Route("/api/debug/injections", injection_debug, methods=["GET"]),
             Route("/v1/models", models, methods=["GET"]),
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
             Route("/v1/messages", anthropic_messages, methods=["POST"]),
