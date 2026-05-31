@@ -41,6 +41,17 @@ def load_config(config_path: str = None) -> dict:
         "write_path": {
             "semantic_search_timeout_seconds": 3,
         },
+        "memory_write_gate": {
+            "enabled": True,
+            "auto_sources": ["operit", "workflow", "worker", "auto"],
+            "pending_threshold": 0.42,
+            "grow_threshold": 0.72,
+            "duplicate_similarity": 0.88,
+            "repeat_similarity": 0.82,
+            "repeat_promote_count": 2,
+            "candidate_log": "memory_write_candidates.jsonl",
+            "max_recent_candidates": 120,
+        },
         "identity": {
             "ai_name": "Haven",
             "user_name": "Rain",
@@ -57,9 +68,40 @@ def load_config(config_path: str = None) -> dict:
         },
         "embedding": {
             "enabled": True,
-            "model": "gemini-embedding-001",
+            "model": "Qwen/Qwen3-Embedding-4B",
+            "base_url": "https://api.siliconflow.cn/v1",
+            "api_key": "",
+            "max_chars": 6000,
+            "query_instruction": "Given a memory search query, retrieve relevant long-term memory passages.",
+            "document_instruction": "",
+        },
+        "reranker": {
+            "enabled": True,
+            "model": "Qwen/Qwen3-Reranker-4B",
             "base_url": "",
             "api_key": "",
+            "candidate_limit": 20,
+            "score_weight": 0.65,
+            "timeout_seconds": 12,
+        },
+        "recall_diagnostics": {
+            "enabled": False,
+            "path": "",
+            "max_candidates": 20,
+            "max_text_chars": 220,
+        },
+        "recall_thresholds": {
+            "vector_min_score": 0.50,
+            "facet_vector_min_score": 0.45,
+            "vague_vector_min_score": 0.40,
+            "explicit_vector_min_score": 0.55,
+            "vague_top_k": 50,
+        },
+        "moment_annotations": {
+            "enabled": True,
+            "max_summary_chars": 160,
+            "max_evidence_spans": 3,
+            "max_evidence_chars": 120,
         },
         "decay": {
             "lambda": 0.05,
@@ -77,6 +119,30 @@ def load_config(config_path: str = None) -> dict:
         "anchor": {
             "max_count": 24,
             "min_age_hours": 24,
+        },
+        "node_facets": {
+            "enabled": True,
+            "store": "sqlite",
+            "salience_min": 0.2,
+            "salience_max": 1.3,
+        },
+        "memory_relevance": {
+            "aliases": {
+                "relationship_identity": [
+                    "human-ai relationship",
+                    "ai relationship",
+                    "人机恋",
+                    "人机关系",
+                    "AI伴侣",
+                ],
+                "intimacy": ["intimacy", "sexual", "nsfw", "亲密", "情欲", "欲望"],
+                "embodiment": ["embodiment", "physical body", "具身", "身体", "形体"],
+                "hardware_protocol": ["hardware", "protocol", "ble", "esp32", "mpr121", "硬件", "协议"],
+                "communication_action": ["email", "mail", "message", "发邮件", "邮件", "发消息"],
+                "old_or_resolved": ["legacy", "deprecated", "resolved", "旧版", "废弃", "已解决"],
+            },
+            "blocked_facets": [],
+            "section_hints": {},
         },
         "gateway": {
             "host": "0.0.0.0",
@@ -130,6 +196,11 @@ def load_config(config_path: str = None) -> dict:
             "max_personality_delta": 0.01,
             "max_relationship_delta": 0.03,
             "max_affect_delta": 0.18,
+            "event_batch_size": 2,
+            "event_affect_total_threshold": 0.45,
+            "event_affect_single_threshold": 0.14,
+            "event_similarity_threshold": 0.82,
+            "event_force_after_minutes": 30,
             "initial_personality": {
                 "openness": 0.56,
                 "conscientiousness": 0.50,
@@ -308,6 +379,63 @@ def load_config(config_path: str = None) -> dict:
             "yes",
             "on",
         )
+
+    env_embedding_max_chars = os.environ.get("OMBRE_EMBEDDING_MAX_CHARS", "")
+    if env_embedding_max_chars:
+        try:
+            config.setdefault("embedding", {})["max_chars"] = int(env_embedding_max_chars)
+        except ValueError:
+            logging.warning(
+                f"Invalid OMBRE_EMBEDDING_MAX_CHARS / 无效的 OMBRE_EMBEDDING_MAX_CHARS: {env_embedding_max_chars}"
+            )
+
+    env_embedding_query_instruction = os.environ.get("OMBRE_EMBEDDING_QUERY_INSTRUCTION", "")
+    if env_embedding_query_instruction:
+        config.setdefault("embedding", {})["query_instruction"] = env_embedding_query_instruction
+
+    env_reranker_api_key = os.environ.get("OMBRE_RERANKER_API_KEY", "")
+    if env_reranker_api_key:
+        config.setdefault("reranker", {})["api_key"] = env_reranker_api_key
+
+    env_reranker_base_url = os.environ.get("OMBRE_RERANKER_BASE_URL", "")
+    if env_reranker_base_url:
+        config.setdefault("reranker", {})["base_url"] = env_reranker_base_url
+
+    env_reranker_model = os.environ.get("OMBRE_RERANKER_MODEL", "")
+    if env_reranker_model:
+        config.setdefault("reranker", {})["model"] = env_reranker_model
+
+    env_reranker_enabled = os.environ.get("OMBRE_RERANKER_ENABLED", "")
+    if env_reranker_enabled:
+        config.setdefault("reranker", {})["enabled"] = env_reranker_enabled.lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    env_recall_diagnostics_enabled = os.environ.get("OMBRE_RECALL_DIAGNOSTICS_ENABLED", "")
+    if env_recall_diagnostics_enabled:
+        config.setdefault("recall_diagnostics", {})["enabled"] = env_recall_diagnostics_enabled.lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    env_recall_diagnostics_path = os.environ.get("OMBRE_RECALL_DIAGNOSTICS_PATH", "")
+    if env_recall_diagnostics_path:
+        config.setdefault("recall_diagnostics", {})["path"] = env_recall_diagnostics_path
+
+    env_recall_diagnostics_max_candidates = os.environ.get("OMBRE_RECALL_DIAGNOSTICS_MAX_CANDIDATES", "")
+    if env_recall_diagnostics_max_candidates:
+        try:
+            config.setdefault("recall_diagnostics", {})["max_candidates"] = int(env_recall_diagnostics_max_candidates)
+        except ValueError:
+            logging.warning(
+                "Invalid OMBRE_RECALL_DIAGNOSTICS_MAX_CANDIDATES / "
+                f"无效的 OMBRE_RECALL_DIAGNOSTICS_MAX_CANDIDATES: {env_recall_diagnostics_max_candidates}"
+            )
 
     env_transport = os.environ.get("OMBRE_TRANSPORT", "")
     if env_transport:

@@ -14,6 +14,7 @@ RELATION_TYPES = {
     "blocks",
     "belongs_to",
     "emotional_echo",
+    "evidenced_by",
     "relates_to",
 }
 

@@ -50,6 +50,7 @@ import re
 import secrets
 import time
 from base64 import b64decode
+from dataclasses import replace
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
@@ -59,7 +60,7 @@ import httpx
 # --- 确保同目录下的模块能被正确导入 ---
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
@@ -68,9 +69,35 @@ from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
 from identity import identity_names
 from import_memory import ImportEngine
+from memory_diffusion import (
+    diffuse_memory,
+    diffusion_options_from_config,
+    format_diffusion_path,
+    format_diffusion_trace,
+    path_has_caution,
+    seed_scores_for_buckets,
+    should_suppress_context_candidate,
+)
 from memory_edges import MemoryEdgeStore
+from memory_moments import MemoryMomentStore
+from memory_relevance import (
+    active_facets,
+    facets_for_text,
+    memory_relevance_options_from_config,
+    query_has_facet,
+    query_has_explicit_entity_marker,
+    recall_search_query,
+    recall_rank,
+    relevance_decision,
+    relevance_multiplier,
+)
+from recall_policy import CONTEXT_ONLY_SECTIONS, RecallPolicy
+from memory_write_gate import MemoryWriteGate, WriteGateDecision
+from memory_nodes import MemoryNodeStore
 from persona_engine import PersonaStateEngine
 from reflection_engine import ReflectionEngine
+from recall_diagnostics import RecallDiagnosticsLogger
+from reranker_engine import RerankerEngine
 from utils import (
     bucket_text_for_embedding,
     count_tokens_approx,
@@ -92,9 +119,14 @@ bucket_mgr = BucketManager(config)                  # Bucket manager / 记忆桶
 dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
 embedding_engine = EmbeddingEngine(config)            # Embedding engine / 向量化引擎
+reranker_engine = RerankerEngine(config)              # Reranker / 召回重排序
+recall_diagnostics = RecallDiagnosticsLogger(config)  # Recall diagnostics / 召回诊断
 import_engine = ImportEngine(config, bucket_mgr, dehydrator, embedding_engine)  # Import engine / 导入引擎
 persona_engine = PersonaStateEngine(config)           # Persona state engine / 人格状态引擎
 memory_edge_store = MemoryEdgeStore(config)            # Explicit memory relationship edges / 显式记忆关系边
+memory_node_store = MemoryNodeStore(config)            # Computable memory node index / 可计算记忆节点
+memory_moment_store = MemoryMomentStore(config)        # Structured bucket body/comment moment index / 记忆片段索引
+memory_write_gate = MemoryWriteGate(config)            # Automatic grow gate / 自动写入门卫
 reflection_engine = ReflectionEngine(config)           # Reflection worker / 关系天气与关系整理
 dream_engine = DreamEngine(config)                     # Night dream worker / 夜梦
 
@@ -623,6 +655,40 @@ def _int_between(value, default: int, low: int = 1, high: int = 10) -> int:
     return max(low, min(high, number))
 
 
+def _date_key(value) -> str:
+    match = re.search(r"\d{4}-\d{2}-\d{2}", str(value or ""))
+    return match.group(0) if match else ""
+
+
+def _filter_by_created_date(
+    buckets: list[dict],
+    *,
+    created_date: str = "",
+    created_from: str = "",
+    created_to: str = "",
+) -> tuple[list[dict], str]:
+    exact = _date_key(created_date)
+    start = exact or _date_key(created_from)
+    end = exact or _date_key(created_to)
+    if not start and not end:
+        return buckets, ""
+
+    filtered = []
+    for bucket in buckets:
+        day = _date_key((bucket.get("metadata") or {}).get("created", ""))
+        if not day:
+            continue
+        if start and day < start:
+            continue
+        if end and day > end:
+            continue
+        filtered.append(bucket)
+
+    if start and end and start == end:
+        return filtered, f", created_date={start}"
+    return filtered, f", created_from={start or '*'}, created_to={end or '*'}"
+
+
 def _bool_value(value, default: bool = False) -> bool:
     if value is None:
         return default
@@ -760,6 +826,11 @@ def _bucket_read_payload(bucket: dict) -> dict:
         "activation_count",
         "comment_count",
         "comments",
+        "profile_kind",
+        "subject",
+        "predicate",
+        "object",
+        "evidence",
     ]
     return {
         "id": bucket["id"],
@@ -1053,6 +1124,76 @@ def _bucket_text_for_embedding(bucket: dict) -> str:
     return f"{strip_wikilinks(bucket.get('content', '')).strip()}\n{comment_text}".strip()
 
 
+def _bucket_context_snippet(bucket: dict, max_chars: int = 180) -> str:
+    text = " ".join(strip_wikilinks(str(bucket.get("content") or "")).split())
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "..."
+
+
+def _compact_diffused_summary(bucket: dict, dehydrated: str, max_chars: int = 180) -> str:
+    raw = str(dehydrated or "").strip()
+    extracted = _summary_from_jsonish_text(raw)
+    if extracted:
+        return _clip_text(extracted, max_chars)
+
+    meta = bucket.get("metadata", {}) or {}
+    title = str(meta.get("name") or bucket.get("id") or "记忆").strip()
+    return _clip_text(title, max_chars)
+
+
+def _bucket_diffusion_path_summary(path, bucket_map: dict[str, dict], max_chars: int = 180) -> str:
+    if not path:
+        return ""
+    return _clip_text(format_diffusion_path(path, bucket_map), max_chars)
+
+
+def _breath_one_hop_diffusion_options(top_k: int):
+    return replace(
+        diffusion_options_from_config(config),
+        max_hops=1,
+        top_k=max(0, int(top_k or 0)),
+    )
+
+
+def _summary_from_jsonish_text(text: str) -> str:
+    if not text:
+        return ""
+    candidates = [text]
+    start = text.find("{")
+    end = text.rfind("}")
+    if 0 <= start < end:
+        candidates.append(text[start:end + 1])
+
+    for candidate in candidates:
+        try:
+            data = _json_lib.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            for key in ("summary", "memory_summary", "gist"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return " ".join(strip_wikilinks(value).split())
+            core_facts = data.get("core_facts")
+            if isinstance(core_facts, list) and core_facts:
+                facts = [
+                    " ".join(strip_wikilinks(str(item)).split())
+                    for item in core_facts[:2]
+                    if str(item).strip()
+                ]
+                if facts:
+                    return "；".join(facts)
+    return ""
+
+
+def _clip_text(text: str, max_chars: int) -> str:
+    compact = " ".join(strip_wikilinks(str(text or "")).split())
+    if len(compact) <= max_chars:
+        return compact
+    return compact[:max_chars].rstrip() + "..."
+
+
 async def _refresh_bucket_embedding(bucket_id: str) -> bool:
     if not getattr(embedding_engine, "enabled", False):
         return False
@@ -1278,12 +1419,14 @@ async def _merge_or_create(
     return bucket_id, name or bucket_id, False, related_bucket
 
 
-async def _build_mcp_related_memory_block(
+async def _build_mcp_diffused_memory_block(
     source_buckets: list[dict],
     all_buckets: list[dict] | None,
     token_budget: int,
     limit_per_source: int,
     min_confidence: float,
+    query_text: str = "",
+    exclude_bucket_ids: set[str] | None = None,
 ) -> str:
     if token_budget <= 0 or not source_buckets:
         return ""
@@ -1295,6 +1438,7 @@ async def _build_mcp_related_memory_block(
 
     source_ids = [bucket["id"] for bucket in source_buckets if bucket.get("id")]
     source_set = set(source_ids)
+    exclude_set = source_set | set(exclude_bucket_ids or set())
     if not source_ids:
         return ""
 
@@ -1302,22 +1446,43 @@ async def _build_mcp_related_memory_block(
         try:
             all_buckets = await bucket_mgr.list_all(include_archive=False)
         except Exception as e:
-            logger.warning(f"Failed to list buckets for related memory / 关联记忆列桶失败: {e}")
+            logger.warning(f"Failed to list buckets for diffused memory / 联想浮现列桶失败: {e}")
             all_buckets = []
 
     bucket_map = {bucket["id"]: bucket for bucket in all_buckets if bucket.get("id")}
-    edges = memory_edge_store.related_edges(
-        source_ids,
-        min_confidence=min_confidence,
-        limit_per_source=limit_per_source,
+    node_salience = None
+    node_resonance = None
+    if _node_facets_enabled(config):
+        try:
+            memory_node_store.bulk_upsert(list(bucket_map.values()))
+            query_facets = memory_node_store.facets_for_text(query_text)
+            node_salience = _node_salience_lookup
+            node_resonance = _node_resonance_lookup(query_facets)
+        except Exception as e:
+            logger.warning(f"Failed to refresh memory nodes / 记忆节点刷新失败: {e}")
+
+    edges = [
+        edge
+        for edge in memory_edge_store.list_edges()
+        if float(edge.get("confidence", 0.0)) >= min_confidence
+    ]
+    hits = diffuse_memory(
+        seed_scores_for_buckets(source_buckets),
+        edges,
+        bucket_map,
+        options=_breath_one_hop_diffusion_options(len(source_ids) * limit_per_source),
+        exclude_ids=exclude_set,
+        node_salience=node_salience,
+        node_resonance=node_resonance,
+        query_text=query_text,
     )
 
     parts = []
     seen_targets = set()
     remaining = token_budget
-    for edge in edges:
-        target_id = edge.get("target")
-        if not target_id or target_id in source_set or target_id in seen_targets:
+    for hit in hits:
+        target_id = hit.bucket_id
+        if not target_id or target_id in seen_targets:
             continue
 
         target = bucket_map.get(target_id)
@@ -1326,22 +1491,29 @@ async def _build_mcp_related_memory_block(
         meta = target.get("metadata", {})
         if meta.get("type") == "feel":
             continue
+        if (
+            query_text
+            and _query_requires_direct_topic_evidence(query_text)
+            and not _query_wants_body_chain(query_text)
+            and not _bucket_has_query_topic_evidence(query_text, target)
+        ):
+            continue
 
         try:
             clean_meta = {k: v for k, v in meta.items() if k != "tags"}
-            summary = await dehydrator.dehydrate(
+            raw_summary = await dehydrator.dehydrate(
                 _bucket_text_for_embedding(target),
                 clean_meta,
             )
-            arrow = "<-" if edge.get("direction") == "incoming" else "->"
-            confidence = edge.get("confidence", 0.0)
-            relation_type = edge.get("relation_type", "relates_to")
-            reason = edge.get("reason") or relation_type
-            block = (
-                f"[{edge.get('source')} {arrow} {target_id}] "
-                f"[{relation_type}, confidence={confidence}] {reason}\n"
-                f"[bucket_id:{target_id}] {summary}"
+            summary = _compact_diffused_summary(target, raw_summary)
+            path_summary = _bucket_diffusion_path_summary(hit.best_path, bucket_map)
+            caution = (
+                "路径含冲突/阻断，仅作边界背景。"
+                if path_has_caution(hit.best_path)
+                else "背景联想，不代表当前事实。"
             )
+            path_part = f"路径: {path_summary}；" if path_summary else ""
+            block = f"- [bucket_id:{target_id}] {path_part}摘要: {summary}（{caution}）"
             block_tokens = count_tokens_approx(block)
             if block_tokens > remaining:
                 break
@@ -1351,10 +1523,1171 @@ async def _build_mcp_related_memory_block(
             if remaining <= 0:
                 break
         except Exception as e:
-            logger.warning(f"Failed to build related memory block / 关联记忆构建失败: {e}")
+            logger.warning(f"Failed to build diffused memory block / 联想浮现构建失败: {e}")
             continue
 
     return "\n---\n".join(parts)
+
+
+MOMENT_SECTION_LABELS = {
+    "body": "body",
+    "moment": "moment",
+    "fact": "fact",
+    "original": "original",
+    "evidence_context": "evidence_context",
+    "context": "context",
+    "reflection": "reflection",
+    "feeling": "feeling",
+    "followup": "followup",
+    "affect_anchor": "affect_anchor",
+    "favorite_reason": "favorite_reason",
+    "comment": "年轮",
+}
+
+MOMENT_TEMPERATURE_SECTIONS = CONTEXT_ONLY_SECTIONS
+PROFILE_CONTEXT_SECTIONS = ("evidence_context", "context", "reflection", "feeling", "followup", "comment")
+
+
+def _moment_text(moment: dict, max_chars: int = 500) -> str:
+    return _clip_text(" ".join(str(moment.get("text") or "").split()), max_chars)
+
+
+def _moment_label(moment: dict) -> str:
+    section = str(moment.get("section") or "moment")
+    return MOMENT_SECTION_LABELS.get(section, section)
+
+
+def _moment_bucket_title(moment: dict) -> str:
+    meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+    return str(meta.get("bucket_name") or moment.get("bucket_id") or "").strip()
+
+
+def _moments_by_bucket(moments: list[dict]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for moment in moments:
+        bucket_id = str(moment.get("bucket_id") or "")
+        if bucket_id:
+            grouped.setdefault(bucket_id, []).append(moment)
+    for items in grouped.values():
+        items.sort(key=lambda item: int(item.get("ordinal") or 0))
+    return grouped
+
+
+def _recallable_moments(moments: list[dict]) -> list[dict]:
+    return [
+        moment for moment in moments
+        if (moment.get("metadata", {}) or {}).get("bucket_type") != "feel"
+    ]
+
+
+def _direct_recallable_moments(moments: list[dict]) -> list[dict]:
+    return [
+        moment for moment in _recallable_moments(moments)
+        if moment.get("section") not in MOMENT_TEMPERATURE_SECTIONS
+    ]
+
+
+def _representative_moment(moments: list[dict]) -> dict | None:
+    for section in (
+        "original",
+        "moment",
+        "fact",
+        "body",
+        "evidence_context",
+        "context",
+        "reflection",
+        "feeling",
+        "followup",
+        "comment",
+    ):
+        for moment in moments:
+            if moment.get("section") == section:
+                return moment
+    return moments[0] if moments else None
+
+
+def _direct_representative_moment(moments: list[dict]) -> dict | None:
+    return _representative_moment(_direct_recallable_moments(moments))
+
+
+def _bucket_edges_as_moment_edges(bucket_edges: list[dict], grouped: dict[str, list[dict]]) -> list[dict]:
+    edges = []
+    for edge in bucket_edges or []:
+        source_bucket = str(edge.get("source") or edge.get("source_memory_id") or "").strip()
+        target_bucket = str(edge.get("target") or edge.get("target_memory_id") or "").strip()
+        if not source_bucket or not target_bucket:
+            continue
+        target = _direct_representative_moment(grouped.get(target_bucket, []))
+        if not target:
+            continue
+        relation_type = str(edge.get("relation_type") or edge.get("type") or "relates_to")
+        try:
+            confidence = float(edge.get("confidence", 0.5))
+        except (TypeError, ValueError):
+            confidence = 0.5
+        for source in grouped.get(source_bucket, []):
+            if source.get("section") in MOMENT_TEMPERATURE_SECTIONS:
+                continue
+            edges.append(
+                {
+                    "source": source["moment_id"],
+                    "target": target["moment_id"],
+                    "bucket_id": source_bucket,
+                    "relation_type": relation_type,
+                    "confidence": max(0.0, min(1.0, confidence)),
+                    "reason": edge.get("reason") or "bucket edge bridge",
+                }
+            )
+    return edges
+
+
+def _moment_diffusion_map(moments: list[dict]) -> dict[str, dict]:
+    mapped = {}
+    for moment in moments:
+        moment_id = moment.get("moment_id")
+        if not moment_id:
+            continue
+        item = dict(moment)
+        meta = dict(item.get("metadata", {}) or {})
+        meta["importance"] = meta.get("bucket_importance", 5)
+        meta["type"] = meta.get("bucket_type", "")
+        meta["anchor"] = meta.get("bucket_anchor", False)
+        meta["pinned"] = meta.get("bucket_pinned", False)
+        meta["protected"] = meta.get("bucket_protected", False)
+        meta["name"] = meta.get("bucket_name", "")
+        meta["resolved"] = meta.get("bucket_resolved", False)
+        meta["digested"] = meta.get("bucket_digested", False)
+        item["metadata"] = meta
+        mapped[str(moment_id)] = item
+    return mapped
+
+
+def _seed_scores_for_moments(moments: list[dict]) -> dict[str, float]:
+    scores = {}
+    for moment in moments:
+        moment_id = str(moment.get("moment_id") or "")
+        if not moment_id:
+            continue
+        try:
+            score = float(moment.get("score", 0.65))
+        except (TypeError, ValueError):
+            score = 0.65
+        scores[moment_id] = max(0.15, min(1.0, score))
+    return scores
+
+
+def _context_moments_for_seed(seed: dict, grouped: dict[str, list[dict]]) -> list[dict]:
+    bucket_id = str(seed.get("bucket_id") or "")
+    seed_id = seed.get("moment_id")
+    bucket_moments = grouped.get(bucket_id, [])
+    contexts = []
+
+    def add_context(moment: dict) -> None:
+        if moment.get("moment_id") == seed_id:
+            return
+        if any(existing.get("moment_id") == moment.get("moment_id") for existing in contexts):
+            return
+        contexts.append(moment)
+
+    if _is_profile_fact_moment(seed):
+        for section in PROFILE_CONTEXT_SECTIONS:
+            for moment in bucket_moments:
+                if moment.get("section") == section:
+                    add_context(moment)
+                    break
+        return contexts[:4]
+
+    seed_ordinal = int(seed.get("ordinal") or 0)
+    for moment in bucket_moments:
+        section = moment.get("section")
+        ordinal = int(moment.get("ordinal") or 0)
+        if abs(ordinal - seed_ordinal) == 1 and section not in MOMENT_TEMPERATURE_SECTIONS:
+            add_context(moment)
+    for section in ("affect_anchor", "favorite_reason", "comment"):
+        for moment in bucket_moments:
+            if moment.get("moment_id") != seed_id and moment.get("section") == section:
+                add_context(moment)
+                break
+    return contexts[:4]
+
+
+def _is_profile_fact_moment(moment: dict) -> bool:
+    meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+    tags = {str(tag) for tag in meta.get("tags", []) or []}
+    tags.update(str(tag) for tag in meta.get("bucket_tags", []) or [])
+    return "profile_fact" in tags or bool(meta.get("profile_kind"))
+
+
+def _format_direct_moment(seed: dict, grouped: dict[str, list[dict]], token_budget: int) -> str:
+    title = _moment_bucket_title(seed)
+    head = f"[bucket_id:{seed['bucket_id']}] [moment_id:{seed['moment_id']}] {_moment_label(seed)}"
+    if title and title != seed["bucket_id"]:
+        head += f" {title}"
+    parts = [head, _moment_text(seed, 520)]
+    context_lines = [
+        f"- [{_moment_label(moment)}] [moment_id:{moment['moment_id']}] {_moment_text(moment, 260)}"
+        for moment in _context_moments_for_seed(seed, grouped)
+    ]
+    if context_lines:
+        parts.append("语境:\n" + "\n".join(context_lines))
+    block = "\n".join(parts)
+    if count_tokens_approx(block) <= token_budget:
+        return block
+    compact = f"{head}\n{_moment_text(seed, 260)}"
+    return compact if count_tokens_approx(compact) <= token_budget else ""
+
+
+def _format_related_moment(
+    moment: dict,
+    caution: bool = False,
+    path=None,
+    moment_map: dict[str, dict] | None = None,
+) -> str:
+    note = "路径含冲突/阻断，仅作边界背景。" if caution else "背景联想，不代表当前事实。"
+    summary = _diffused_moment_summary(moment, path=path, moment_map=moment_map or {})
+    path_part = ""
+    if path is not None:
+        path_summary = _moment_path_summary(path, moment_map or {})
+        if path_summary:
+            path_part = f"路径: {path_summary}；"
+    return (
+        f"- [bucket_id:{moment['bucket_id']}] [moment_id:{moment['moment_id']}] "
+        f"{path_part}摘要: {summary}（{note}）"
+    )
+
+
+def _format_secondary_direct_moment(moment: dict) -> str:
+    summary = _diffused_moment_summary(moment)
+    return (
+        f"- [bucket_id:{moment['bucket_id']}] [moment_id:{moment['moment_id']}] "
+        f"摘要: {summary}（相关命中，来自同一查询语义。）"
+    )
+
+
+def _diffused_moment_summary(
+    moment: dict,
+    *,
+    path=None,
+    moment_map: dict[str, dict] | None = None,
+    max_chars: int = 180,
+) -> str:
+    label = _moment_label(moment)
+    title = _moment_bucket_title(moment) or str(moment.get("bucket_id") or "记忆")
+    status = _moment_status_label(moment)
+    parts = [f"{title} / {label}"]
+    if status:
+        parts.append(status)
+    path_summary = _moment_path_summary(path, moment_map or {}) if path is not None else ""
+    if path_summary:
+        parts.append(f"路径 {path_summary}")
+    return _clip_text("；".join(parts), max_chars)
+
+
+def _moment_status_label(moment: dict) -> str:
+    meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+    if meta.get("resolved") or meta.get("bucket_resolved"):
+        return "已解决"
+    if meta.get("digested") or meta.get("bucket_digested"):
+        return "已消化"
+    if str(meta.get("type") or meta.get("bucket_type") or "").lower() == "archived":
+        return "归档"
+    return ""
+
+
+def _moment_path_summary(path, moment_map: dict[str, dict], max_chars: int = 140) -> str:
+    if path is None:
+        return ""
+    nodes = tuple(str(node_id) for node_id in (getattr(path, "nodes", ()) or ()))
+    if not nodes:
+        return ""
+    labels = [_moment_node_label(moment_map.get(nodes[0]), nodes[0])]
+    for step in getattr(path, "steps", ()) or ():
+        target_id = str(getattr(step, "target", "") or "")
+        arrow = "<-" if getattr(step, "direction", "") == "incoming" else "->"
+        labels.append(f"{arrow} {_moment_node_label(moment_map.get(target_id), target_id)}")
+    return _clip_text(" ".join(labels), max_chars)
+
+
+def _moment_node_label(moment: dict | None, fallback_id: str) -> str:
+    if isinstance(moment, dict):
+        return _clip_text(_moment_bucket_title(moment) or str(moment.get("bucket_id") or fallback_id), 48)
+    return _clip_text(fallback_id, 48)
+
+
+def _recall_relevance_options():
+    return memory_relevance_options_from_config(config)
+
+
+def _apply_recall_relevance_gate(query: str, candidates: list[dict]) -> list[dict]:
+    options = _recall_relevance_options()
+    filtered = []
+    adjusted = False
+    for moment in candidates:
+        multiplier = relevance_multiplier(query, moment, options)
+        if multiplier <= 0:
+            adjusted = True
+            continue
+        item = dict(moment)
+        try:
+            score = float(item.get("score", 0.0))
+        except (TypeError, ValueError):
+            score = 0.0
+        new_score = round(score * multiplier, 4)
+        if new_score != score:
+            adjusted = True
+        item["score"] = new_score
+        filtered.append(item)
+    if adjusted:
+        filtered.sort(key=lambda item: _recall_rank(query, item))
+    return filtered
+
+
+def _recall_admission_thresholds() -> tuple[float, float]:
+    threshold_cfg = config.get("recall_thresholds", {}) or {}
+    return (
+        _float_between(threshold_cfg.get("explicit_admission_semantic_score"), 0.72, 0.0, 1.0),
+        _float_between(threshold_cfg.get("explicit_admission_rerank_score"), 0.65, 0.0, 1.0),
+    )
+
+
+def _recall_policy() -> RecallPolicy:
+    semantic_threshold, rerank_threshold = _recall_admission_thresholds()
+    return RecallPolicy(
+        _recall_relevance_options(),
+        semantic_threshold=semantic_threshold,
+        rerank_threshold=rerank_threshold,
+    )
+
+
+def _breath_moment_admission_decision(
+    query: str,
+    moment: dict,
+    seed_diagnostics: dict[str, dict],
+):
+    seed = seed_diagnostics.get(str(moment.get("bucket_id") or ""), {})
+    return _recall_policy().assess(
+        query,
+        moment,
+        semantic_score=seed.get("embedding_score"),
+        rerank_score=moment.get("rerank_score"),
+        context_only=moment.get("section") in MOMENT_TEMPERATURE_SECTIONS,
+    )
+
+
+async def _rerank_breath_moment_candidates(query: str, candidates: list[dict]) -> list[dict]:
+    if not candidates or not getattr(reranker_engine, "enabled", False):
+        return candidates
+    candidate_limit = min(
+        len(candidates),
+        max(1, int(getattr(reranker_engine, "candidate_limit", 20) or 20)),
+    )
+    head = candidates[:candidate_limit]
+    tail = candidates[candidate_limit:]
+    documents = [_moment_rerank_document(moment) for moment in head]
+    results = await reranker_engine.rerank(query, documents, top_n=len(head))
+    if not results:
+        return candidates
+
+    by_index = {result.index: result.score for result in results}
+    weight = max(0.0, min(1.0, float(getattr(reranker_engine, "score_weight", 0.65))))
+    reranked = []
+    for index, moment in enumerate(head):
+        item = dict(moment)
+        rerank_score = by_index.get(index)
+        try:
+            base_score = float(item.get("score", 0.0))
+        except (TypeError, ValueError):
+            base_score = 0.0
+        if rerank_score is None:
+            item["rerank_score"] = None
+            item["combined_score"] = base_score
+        else:
+            item["rerank_score"] = round(rerank_score, 4)
+            item["combined_score"] = round(base_score * (1.0 - weight) + rerank_score * weight, 4)
+            item["score"] = item["combined_score"]
+        reranked.append(item)
+    reranked.sort(
+        key=lambda item: (
+            _recall_rank(query, item)[0],
+            item.get("rerank_score") is None,
+            -(_safe_float(item.get("combined_score", item.get("score"))) or 0.0),
+            -(_safe_float(item.get("score")) or 0.0),
+        ),
+    )
+    return reranked + tail
+
+
+def _moment_rerank_document(moment: dict) -> str:
+    meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+    fields = [
+        f"title: {meta.get('bucket_name') or moment.get('bucket_id') or ''}",
+        f"section: {moment.get('section') or ''}",
+        f"domain: {' '.join(str(item) for item in meta.get('bucket_domain', []) or [])}",
+        f"tags: {' '.join(str(item) for item in meta.get('bucket_tags', []) or [])}",
+        f"summary: {meta.get('annotation_summary') or meta.get('summary') or ''}",
+        f"facets: {_format_annotation_facets(meta)}",
+        f"evidence: {_format_evidence_spans(meta)}",
+        f"text: {moment.get('text') or ''}",
+    ]
+    return "\n".join(fields)[:4000]
+
+
+def _format_annotation_facets(meta: dict) -> str:
+    facets = meta.get("annotation_facets")
+    if not isinstance(facets, dict):
+        return ""
+    parts = []
+    for facet, score in sorted(facets.items(), key=lambda item: str(item[0])):
+        try:
+            parts.append(f"{facet}:{float(score):.2f}")
+        except (TypeError, ValueError):
+            continue
+    return " ".join(parts)
+
+
+def _format_evidence_spans(meta: dict, max_items: int = 3) -> str:
+    spans = meta.get("evidence_spans")
+    if not isinstance(spans, list):
+        return ""
+    parts = []
+    for item in spans[:max_items]:
+        if isinstance(item, dict):
+            facet = str(item.get("facet") or "").strip()
+            text = str(item.get("text") or item.get("span") or "").strip()
+            if text:
+                parts.append(f"{facet}: {text}" if facet else text)
+        elif str(item).strip():
+            parts.append(str(item).strip())
+    return " | ".join(parts)
+
+
+def _upsert_breath_seed_diagnostic(
+    seed_diagnostics: dict[str, dict],
+    bucket: dict,
+    source: str,
+    *,
+    bucket_search_score: float | None = None,
+    embedding_score: float | None = None,
+) -> None:
+    bucket_id = str(bucket.get("id") or "").strip()
+    if not bucket_id:
+        return
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    item = seed_diagnostics.setdefault(
+        bucket_id,
+        {
+            "bucket_id": bucket_id,
+            "bucket_name": meta.get("name") or bucket_id,
+            "sources": [],
+        },
+    )
+    if source and source not in item["sources"]:
+        item["sources"].append(source)
+    if bucket_search_score is not None:
+        safe_score = _safe_float(bucket_search_score)
+        if safe_score is not None:
+            item["bucket_search_score"] = safe_score
+            item["keyword_score"] = round(_score_to_unit(safe_score), 4)
+    if embedding_score is not None:
+        safe_embedding_score = _safe_float(embedding_score)
+        if safe_embedding_score is not None:
+            item["embedding_score"] = safe_embedding_score
+
+
+def _score_to_unit(score: float) -> float:
+    try:
+        number = float(score)
+    except (TypeError, ValueError):
+        return 0.0
+    if number > 1:
+        number = number / 100.0
+    return max(0.0, min(1.0, number))
+
+
+def _write_breath_recall_diagnostics(
+    *,
+    query: str,
+    recall_thresholds: dict,
+    seed_diagnostics: dict[str, dict],
+    pre_gate_candidates: list[dict],
+    gated_candidates: list[dict],
+    reranked_candidates: list[dict],
+    returned_moments: list[dict],
+    suppressed_candidates: list[dict],
+    displayed_moment_ids: list[str],
+    secondary_moment_ids: list[str],
+    related_source_bucket_ids: list[str],
+    related_included: bool,
+    drift_included: bool,
+    dream_included: bool,
+    response_sections: list[str],
+) -> None:
+    if not getattr(recall_diagnostics, "enabled", False):
+        return
+
+    gated_by_id = _moment_index(gated_candidates)
+    reranked_by_id = _moment_index(reranked_candidates)
+    suppressed_by_id = _moment_index(suppressed_candidates)
+    gated_rank = _moment_rank(gated_candidates)
+    reranked_rank = _moment_rank(reranked_candidates)
+    returned_ids = [str(moment.get("moment_id") or "") for moment in returned_moments if moment.get("moment_id")]
+    returned_set = set(returned_ids)
+    displayed_set = set(displayed_moment_ids)
+    secondary_set = set(secondary_moment_ids)
+    options = _recall_relevance_options()
+    max_candidates = max(1, int(getattr(recall_diagnostics, "max_candidates", 20) or 20))
+
+    candidates = []
+    for index, moment in enumerate(pre_gate_candidates[:max_candidates]):
+        moment_id = str(moment.get("moment_id") or "")
+        bucket_id = str(moment.get("bucket_id") or "")
+        decision = relevance_decision(query, moment, options)
+        gated = gated_by_id.get(moment_id)
+        reranked = reranked_by_id.get(moment_id)
+        final = reranked or gated
+        seed = seed_diagnostics.get(bucket_id, {})
+        admission = _breath_moment_admission_decision(query, final or moment, seed_diagnostics)
+        candidate = {
+            "pre_rank": index,
+            "gate_rank": gated_rank.get(moment_id),
+            "final_rank": reranked_rank.get(moment_id),
+            "bucket_id": bucket_id,
+            "bucket_name": _moment_bucket_title(moment),
+            "moment_id": moment_id,
+            "section": moment.get("section"),
+            "sources": seed.get("sources", []),
+            "bucket_search_score": seed.get("bucket_search_score"),
+            "keyword_score": seed.get("keyword_score"),
+            "embedding_score": seed.get("embedding_score"),
+            "score_before_gate": _safe_float(moment.get("score")),
+            "score_after_gate": _safe_float(gated.get("score")) if gated else None,
+            "rerank_score": _safe_float(final.get("rerank_score")) if final else None,
+            "combined_score": _safe_float(final.get("combined_score")) if final else None,
+            "intent_rank": _recall_rank(query, final or moment)[0],
+            "gate": "filtered" if decision.multiplier <= 0 else "kept",
+            "gate_multiplier": round(float(decision.multiplier), 4),
+            "gate_reasons": list(decision.reasons),
+            "admission": "suppressed" if moment_id in suppressed_by_id else "admitted" if admission.admit else "suppressed",
+            "admission_reason": admission.reason,
+            "selected_returned": moment_id in returned_set,
+            "selected_direct": moment_id in displayed_set,
+            "selected_secondary": moment_id in secondary_set,
+            "annotation_summary": (moment.get("metadata") or {}).get("annotation_summary"),
+            "annotation_facets": (moment.get("metadata") or {}).get("annotation_facets", {}),
+            "evidence_spans": (moment.get("metadata") or {}).get("evidence_spans", []),
+            "text_preview": _diagnostic_text_preview(moment),
+        }
+        candidates.append(candidate)
+
+    recall_diagnostics.write(
+        {
+            "source": "breath",
+            "mode": "search",
+            "query": str(query or ""),
+            "recall_thresholds": recall_thresholds,
+            "seed_buckets": list(seed_diagnostics.values())[:max_candidates],
+            "candidates": candidates,
+            "suppressed_candidates": [
+                {
+                    "bucket_id": str(moment.get("bucket_id") or ""),
+                    "bucket_name": _moment_bucket_title(moment),
+                    "moment_id": str(moment.get("moment_id") or ""),
+                    "section": moment.get("section"),
+                    "admission_reason": str(moment.get("_admission_reason") or "suppressed"),
+                    "score": _safe_float(moment.get("score")),
+                    "rerank_score": _safe_float(moment.get("rerank_score")),
+                    "text_preview": _diagnostic_text_preview(moment),
+                }
+                for moment in suppressed_candidates[:max_candidates]
+            ],
+            "final": {
+                "returned_moment_ids": returned_ids,
+                "direct_moment_ids": displayed_moment_ids,
+                "secondary_moment_ids": secondary_moment_ids,
+                "related_source_bucket_ids": related_source_bucket_ids,
+                "related_included": related_included,
+                "drift_included": drift_included,
+                "dream_included": dream_included,
+                "response_sections": response_sections,
+            },
+        }
+    )
+
+
+def _format_suppressed_recall_candidate(moment: dict, seed_diagnostics: dict[str, dict]) -> str:
+    bucket_id = str(moment.get("bucket_id") or "")
+    seed = seed_diagnostics.get(bucket_id, {})
+    parts = [
+        f"- [bucket_id:{bucket_id}] [moment_id:{moment.get('moment_id') or ''}]",
+        f"reason={moment.get('_admission_reason') or 'suppressed'}",
+    ]
+    if seed.get("embedding_score") is not None:
+        parts.append(f"semantic={seed.get('embedding_score')}")
+    if moment.get("rerank_score") is not None:
+        parts.append(f"rerank={moment.get('rerank_score')}")
+    preview = _diagnostic_text_preview(moment)
+    if preview:
+        parts.append(f"preview={preview}")
+    return " ".join(parts)
+
+
+def _moment_index(moments: list[dict]) -> dict[str, dict]:
+    return {
+        str(moment.get("moment_id")): moment
+        for moment in moments
+        if moment.get("moment_id")
+    }
+
+
+def _moment_rank(moments: list[dict]) -> dict[str, int]:
+    return {
+        str(moment.get("moment_id")): index
+        for index, moment in enumerate(moments)
+        if moment.get("moment_id")
+    }
+
+
+def _safe_float(value) -> float | None:
+    try:
+        return round(float(value), 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def _diagnostic_text_preview(moment: dict) -> str:
+    max_chars = max(0, int(getattr(recall_diagnostics, "max_text_chars", 220) or 0))
+    if max_chars <= 0:
+        return ""
+    return _moment_text(moment, max_chars)
+
+
+def _breath_recall_thresholds(query: str, max_results: int) -> dict:
+    threshold_cfg = config.get("recall_thresholds", {}) or {}
+    options = _recall_relevance_options()
+    query_active = active_facets(facets_for_text(query, options))
+    has_explicit = _query_has_explicit_entity_marker(query)
+    is_vague = _query_is_vague_recall(query)
+
+    base_vector_min = _float_between(threshold_cfg.get("vector_min_score"), 0.50, 0.0, 1.0)
+    profile = "default"
+    vector_min = base_vector_min
+    top_k = max(max_results, 20)
+
+    if has_explicit:
+        profile = "explicit"
+        vector_min = _float_between(threshold_cfg.get("explicit_vector_min_score"), 0.55, 0.0, 1.0)
+    elif is_vague:
+        profile = "vague"
+        vector_min = _float_between(threshold_cfg.get("vague_vector_min_score"), 0.40, 0.0, 1.0)
+        top_k = max(top_k, _int_between(threshold_cfg.get("vague_top_k"), 50, 20, 100))
+    elif query_active:
+        profile = "facet"
+        vector_min = _float_between(threshold_cfg.get("facet_vector_min_score"), 0.45, 0.0, 1.0)
+
+    return {
+        "profile": profile,
+        "vector_min_score": vector_min,
+        "semantic_top_k": top_k,
+        "query_facets": sorted(query_active),
+        "has_explicit_entity": has_explicit,
+        "is_vague": is_vague,
+    }
+
+
+def _query_has_explicit_entity_marker(query: str) -> bool:
+    return query_has_explicit_entity_marker(query)
+
+
+def _query_is_vague_recall(query: str) -> bool:
+    text = str(query or "").strip().lower()
+    if not text:
+        return False
+    vague_markers = (
+        "最近",
+        "有趣",
+        "想起来",
+        "回忆",
+        "记忆",
+        "什么事",
+        "有什么",
+        "随便",
+        "random",
+        "recent",
+        "interesting",
+        "anything",
+        "memory",
+        "memories",
+    )
+    if any(marker in text for marker in vague_markers):
+        return True
+    terms = re.findall(r"[A-Za-z0-9_./:-]+|[\u4e00-\u9fff]{1,4}", text)
+    return len(terms) <= 2 and not _query_has_explicit_entity_marker(text)
+
+
+def _query_wants_body_chain(query: str) -> bool:
+    return query_has_facet(query, "embodiment", _recall_relevance_options())
+
+
+def _query_requires_direct_topic_evidence(query: str) -> bool:
+    return _recall_policy().requires_topic_evidence(query)
+
+
+def _recall_rank(query: str, moment: dict) -> tuple[int, float]:
+    return recall_rank(query, moment, _recall_relevance_options())
+
+
+def _secondary_direct_limit(query: str, related_per_memory: int) -> int:
+    if _query_wants_body_chain(query):
+        return 5
+    return max(0, min(2, int(related_per_memory or 0)))
+
+
+def _secondary_direct_moments(
+    query: str,
+    candidates: list[dict],
+    displayed_bucket_ids: set[str],
+    limit: int,
+) -> list[dict]:
+    if limit <= 0:
+        return []
+    hidden = []
+    seen_buckets = set(displayed_bucket_ids)
+    for moment in candidates:
+        bucket_id = str(moment.get("bucket_id") or "")
+        if not bucket_id or bucket_id in seen_buckets:
+            continue
+        if moment.get("section") in MOMENT_TEMPERATURE_SECTIONS:
+            continue
+        if should_suppress_context_candidate(query, moment, _recall_relevance_options()):
+            continue
+        if not _query_wants_body_chain(query) and not _moment_has_query_topic_evidence(query, moment):
+            continue
+        hidden.append(moment)
+        seen_buckets.add(bucket_id)
+    if _query_wants_body_chain(query):
+        hidden.sort(key=lambda moment: _recall_rank(query, moment))
+    return hidden[:limit]
+
+
+def _moment_has_query_topic_evidence(query: str, moment: dict) -> bool:
+    return _recall_policy().moment_has_topic_evidence(query, moment)
+
+
+def _bucket_has_query_topic_evidence(query: str, bucket: dict) -> bool:
+    return _recall_policy().bucket_has_topic_evidence(query, bucket)
+
+
+def _specific_query_terms(query: str) -> list[str]:
+    return _recall_policy().specific_query_terms(query)
+
+
+def _representative_moments_by_bucket(moments: list[dict]) -> dict[str, dict]:
+    grouped = _moments_by_bucket(moments)
+    representatives = {}
+    for bucket_id, bucket_moments in grouped.items():
+        representative = _direct_representative_moment(bucket_moments)
+        if representative:
+            representatives[bucket_id] = representative
+    return representatives
+
+
+async def _refresh_moment_graph(all_buckets: list[dict] | None = None) -> tuple[list[dict], dict[str, list[dict]], list[dict]]:
+    if all_buckets is None:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+    memory_moment_store.bulk_upsert(all_buckets)
+    moments = _recallable_moments(memory_moment_store.list_all())
+    grouped = _moments_by_bucket(moments)
+    edges = memory_moment_store.list_edges()
+    edges.extend(_bucket_edges_as_moment_edges(memory_edge_store.list_edges(), grouped))
+    return moments, grouped, edges
+
+
+async def _build_mcp_moment_diffused_memory_block(
+    seed_moments: list[dict],
+    moments: list[dict],
+    edges: list[dict],
+    token_budget: int,
+    limit_per_source: int,
+    min_confidence: float,
+    exclude_bucket_ids: set[str] | None = None,
+    query_text: str = "",
+) -> str:
+    if token_budget <= 0 or not seed_moments:
+        return ""
+    limit_per_source = _int_between(limit_per_source, 1, 0, 5)
+    if limit_per_source <= 0:
+        return ""
+    min_confidence = _float_between(min_confidence, 0.55, 0.0, 1.0)
+    edges = [
+        edge for edge in edges
+        if float(edge.get("confidence", 0.0)) >= min_confidence
+    ]
+    moment_map = _moment_diffusion_map(moments)
+    representatives = _representative_moments_by_bucket(moments)
+    exclude_bucket_ids = set(exclude_bucket_ids or set())
+    hits = diffuse_memory(
+        _seed_scores_for_moments(seed_moments),
+        edges,
+        moment_map,
+        options=_breath_one_hop_diffusion_options(len(seed_moments) * limit_per_source),
+        exclude_ids={moment["moment_id"] for moment in seed_moments if moment.get("moment_id")},
+        query_text=query_text,
+    )
+
+    parts = []
+    seen = set()
+    remaining = token_budget
+    for hit in hits:
+        moment = moment_map.get(hit.bucket_id)
+        if not moment or hit.bucket_id in seen:
+            continue
+        bucket_id = str(moment.get("bucket_id") or "")
+        if bucket_id in exclude_bucket_ids:
+            continue
+        if moment.get("section") in MOMENT_TEMPERATURE_SECTIONS:
+            replacement = representatives.get(bucket_id)
+            if replacement:
+                moment = replacement
+                if moment.get("moment_id") in seen:
+                    continue
+        block = _format_related_moment(
+            moment,
+            path_has_caution(hit.best_path),
+            path=hit.best_path,
+            moment_map=moment_map,
+        )
+        block_tokens = count_tokens_approx(block)
+        if block_tokens > remaining:
+            break
+        parts.append(block)
+        seen.add(hit.bucket_id)
+        remaining -= block_tokens
+        if remaining <= 0:
+            break
+    return "\n---\n".join(parts)
+
+
+async def _collect_diffusion_seed_buckets(query: str, max_seeds: int) -> tuple[list[dict], list[str]]:
+    warnings = []
+    matches: list[dict] = []
+    matched_ids: set[str] = set()
+    search_limit = max(max_seeds, 20)
+
+    try:
+        for bucket in await bucket_mgr.search(query, limit=search_limit):
+            if not bucket or bucket.get("metadata", {}).get("type") == "feel":
+                continue
+            bucket_id = bucket.get("id")
+            if not bucket_id or bucket_id in matched_ids:
+                continue
+            candidate = dict(bucket)
+            candidate["_inspect_source"] = "keyword"
+            matches.append(candidate)
+            matched_ids.add(bucket_id)
+    except Exception as e:
+        logger.warning(f"Inspect diffusion keyword search failed / 扩散诊断关键词检索失败: {e}")
+        warnings.append(f"keyword_search_failed: {e}")
+
+    try:
+        vector_results = await embedding_engine.search_similar(query, top_k=search_limit)
+        for bucket_id, sim_score in vector_results:
+            if bucket_id in matched_ids:
+                continue
+            if sim_score <= 0.5:
+                continue
+            bucket = await bucket_mgr.get(bucket_id)
+            if not bucket or bucket.get("metadata", {}).get("type") == "feel":
+                continue
+            candidate = dict(bucket)
+            candidate["score"] = round(sim_score * 100, 2)
+            candidate["vector_match"] = True
+            candidate["_inspect_source"] = "vector"
+            matches.append(candidate)
+            matched_ids.add(bucket_id)
+    except Exception as e:
+        logger.warning(f"Inspect diffusion vector search failed / 扩散诊断向量检索失败: {e}")
+        warnings.append(f"vector_search_failed: {e}")
+
+    return matches[:max_seeds], warnings
+
+
+def _inspect_bucket_label(bucket: dict | None, bucket_id: str) -> str:
+    if not bucket:
+        return bucket_id
+    meta = bucket.get("metadata", {}) or {}
+    return str(meta.get("name") or bucket.get("name") or bucket_id)
+
+
+def _inspect_path_payload(path, bucket_map: dict[str, dict]) -> dict:
+    return {
+        "score": round(float(path.score), 4),
+        "trace": format_diffusion_trace(path, bucket_map, use_labels=True),
+        "nodes": list(path.nodes),
+        "steps": [
+            {
+                "source": step.source,
+                "target": step.target,
+                "direction": step.direction,
+                "relation_type": step.relation_type,
+                "confidence": step.confidence,
+                "reason": step.reason,
+            }
+            for step in path.steps
+        ],
+    }
+
+
+@mcp.tool()
+async def inspect_diffusion(
+    query: str,
+    max_seeds: int = 3,
+    max_hits: int = 5,
+    edge_min_confidence: float = 0.55,
+) -> dict:
+    """只读诊断 query 如何沿 memory_edges 点亮联想记忆；不 touch bucket，不创建记忆。"""
+    query = str(query or "").strip()
+    if not query:
+        return {"status": "error", "error": "query_required"}
+
+    max_seeds = _int_between(max_seeds, 3, 1, 20)
+    max_hits = _int_between(max_hits, 5, 0, 20)
+    edge_min_confidence = _float_between(edge_min_confidence, 0.55, 0.0, 1.0)
+    node_facets_enabled = _node_facets_enabled(config)
+    query_facets = {}
+    if node_facets_enabled:
+        try:
+            query_facets = memory_node_store.facets_for_text(query)
+        except Exception as e:
+            logger.warning(f"Inspect diffusion query facets failed / 扩散诊断 query facets 失败: {e}")
+
+    seed_buckets, warnings = await _collect_diffusion_seed_buckets(query, max_seeds)
+    if not seed_buckets:
+        return {
+            "status": "ok",
+            "query": query,
+            "node_facets_enabled": node_facets_enabled,
+            "query_facets": query_facets,
+            "seeds": [],
+            "hits": [],
+            "warnings": warnings,
+        }
+
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+    except Exception as e:
+        logger.warning(f"Inspect diffusion list buckets failed / 扩散诊断列桶失败: {e}")
+        all_buckets = []
+        warnings.append(f"list_buckets_failed: {e}")
+
+    bucket_map = {bucket["id"]: bucket for bucket in all_buckets if bucket.get("id")}
+    for seed in seed_buckets:
+        if seed.get("id"):
+            bucket_map.setdefault(seed["id"], seed)
+
+    node_salience = None
+    node_resonance = None
+    if node_facets_enabled:
+        try:
+            memory_node_store.bulk_upsert(list(bucket_map.values()))
+            node_salience = _node_salience_lookup
+            node_resonance = _node_resonance_lookup(query_facets)
+        except Exception as e:
+            logger.warning(f"Inspect diffusion node refresh failed / 扩散诊断节点刷新失败: {e}")
+            warnings.append(f"node_refresh_failed: {e}")
+            node_salience = None
+            node_resonance = None
+
+    edges = [
+        edge
+        for edge in memory_edge_store.list_edges()
+        if float(edge.get("confidence", 0.0)) >= edge_min_confidence
+    ]
+    options = replace(diffusion_options_from_config(config), top_k=max_hits)
+    seed_scores = seed_scores_for_buckets(seed_buckets)
+    hits = diffuse_memory(
+        seed_scores,
+        edges,
+        bucket_map,
+        options=options,
+        exclude_ids={bucket["id"] for bucket in seed_buckets if bucket.get("id")},
+        node_salience=node_salience,
+        node_resonance=node_resonance,
+        query_text=query,
+    )
+
+    def node_values(bucket_id: str, bucket: dict | None) -> dict:
+        if not bucket or not node_facets_enabled:
+            return {"salience": None, "resonance": None, "facets": {}}
+        try:
+            node = memory_node_store.get(bucket_id) or memory_node_store.upsert_bucket(bucket)
+            salience = memory_node_store.node_salience(bucket_id, bucket)
+            resonance = (
+                node_resonance(bucket_id, bucket)
+                if node_resonance
+                else 1.0
+            )
+            return {
+                "salience": round(float(salience), 4),
+                "resonance": round(float(resonance), 4),
+                "facets": node.get("facets", {}),
+            }
+        except Exception as e:
+            return {"salience": None, "resonance": None, "facets": {}, "error": str(e)}
+
+    seed_payload = []
+    for bucket in seed_buckets:
+        bucket_id = bucket.get("id", "")
+        values = node_values(bucket_id, bucket)
+        seed_payload.append(
+            {
+                "bucket_id": bucket_id,
+                "name": _inspect_bucket_label(bucket, bucket_id),
+                "source": bucket.get("_inspect_source", "keyword"),
+                "seed_score": round(float(seed_scores.get(bucket_id, 0.0)), 4),
+                **values,
+            }
+        )
+
+    hit_payload = []
+    for hit in hits:
+        bucket = bucket_map.get(hit.bucket_id)
+        values = node_values(hit.bucket_id, bucket)
+        hit_payload.append(
+            {
+                "bucket_id": hit.bucket_id,
+                "name": _inspect_bucket_label(bucket, hit.bucket_id),
+                "score": hit.activation,
+                **values,
+                "path": format_diffusion_trace(hit.best_path, bucket_map, use_labels=True),
+                "path_ids": list(hit.best_path.nodes),
+                "caution": path_has_caution(hit.best_path),
+                "paths": [_inspect_path_payload(path, bucket_map) for path in hit.paths],
+            }
+        )
+
+    return {
+        "status": "ok",
+        "query": query,
+        "node_facets_enabled": node_facets_enabled,
+        "options": {
+            "max_hops": options.max_hops,
+            "top_k": options.top_k,
+            "min_activation": options.min_activation,
+            "edge_min_confidence": edge_min_confidence,
+            "include_incoming": options.include_incoming,
+        },
+        "query_facets": query_facets,
+        "seeds": seed_payload,
+        "hits": hit_payload,
+        "warnings": warnings,
+    }
+
+
+def _inspect_moment_payload(moment: dict, *, include_text: bool) -> dict:
+    text = str(moment.get("text") or "")
+    payload = {
+        "moment_id": moment.get("moment_id"),
+        "bucket_id": moment.get("bucket_id"),
+        "section": moment.get("section"),
+        "ordinal": moment.get("ordinal"),
+        "source": moment.get("source"),
+        "source_id": moment.get("source_id"),
+        "text_hash": moment.get("text_hash"),
+        "text_length": len(text),
+        "metadata": moment.get("metadata", {}),
+        "created_at": moment.get("created_at"),
+        "updated_at": moment.get("updated_at"),
+    }
+    if include_text:
+        payload["text"] = text
+    else:
+        payload["text_preview"] = _clip_text(" ".join(text.split()), 240)
+    return payload
+
+
+@mcp.tool()
+async def inspect_moments(bucket_id: str = "", limit: int = 20) -> dict:
+    """只读诊断 bucket 如何被拆成 moment；写入/刷新 SQLite 索引，不 touch bucket。"""
+    bucket_id = str(bucket_id or "").strip()
+    limit = _int_between(limit, 20, 1, 200)
+
+    if bucket_id:
+        if not MEMORY_ID_RE.fullmatch(bucket_id):
+            return {"status": "error", "error": "invalid bucket_id"}
+        bucket = await bucket_mgr.get(bucket_id)
+        if not bucket:
+            return {"status": "error", "error": "not_found", "bucket_id": bucket_id}
+        moments = memory_moment_store.upsert_bucket(bucket)
+        edges = memory_moment_store.list_edges(bucket_id)
+        meta = bucket.get("metadata", {}) or {}
+        return {
+            "status": "ok",
+            "mode": "bucket",
+            "bucket_id": bucket_id,
+            "name": str(meta.get("name") or bucket.get("name") or bucket_id),
+            "count": len(moments),
+            "edge_count": len(edges),
+            "db_path": memory_moment_store.db_path,
+            "moments": [
+                _inspect_moment_payload(moment, include_text=True)
+                for moment in moments[:limit]
+            ],
+            "edges": edges[:limit],
+        }
+
+    buckets = await bucket_mgr.list_all(include_archive=False)
+    indexed = memory_moment_store.bulk_upsert(buckets)
+    stats = memory_moment_store.stats()
+    sample = memory_moment_store.sample(limit)
+    return {
+        "status": "ok",
+        "mode": "bulk",
+        "indexed_buckets": indexed["buckets"],
+        "indexed_moments": indexed["moments"],
+        "total_buckets": stats["buckets"],
+        "total_moments": stats["moments"],
+        "total_edges": stats.get("edges", 0),
+        "db_path": memory_moment_store.db_path,
+        "sample": [
+            _inspect_moment_payload(moment, include_text=False)
+            for moment in sample
+        ],
+    }
+
+
+def _node_facets_enabled(cfg: dict | None) -> bool:
+    node_cfg = (cfg or {}).get("node_facets", {}) or {}
+    if isinstance(node_cfg, dict):
+        return _bool_value(node_cfg.get("enabled", True), True)
+    return True
+
+
+def _node_salience_lookup(bucket_id: str, bucket: dict) -> float:
+    return memory_node_store.node_salience(bucket_id, bucket)
+
+
+def _node_resonance_lookup(query_facets: dict):
+    if not _has_active_facets(query_facets):
+        return None
+
+    def lookup(bucket_id: str, bucket: dict) -> float:
+        return memory_node_store.node_resonance(bucket_id, query_facets, bucket)
+
+    return lookup
+
+
+def _has_active_facets(facets: dict | None) -> bool:
+    for value in (facets or {}).values():
+        if isinstance(value, dict):
+            if any(float(item or 0) > 0 for item in value.values()):
+                return True
+        else:
+            try:
+                if float(value) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
 
 
 # =============================================================
@@ -1380,12 +2713,13 @@ async def breath(
     include_core: bool = True,
     core_limit: int = 3,
     is_session_start: bool = False,
+    debug: bool = False,
 ) -> str:
     """读取记忆,不写入。
     调用方式: 新对话用 breath(is_session_start=True); 查过去用 breath(query="主题词"); 只读模型感受用 breath(domain="feel"); 只读悄悄话用 breath(domain="whisper")。
-    默认只从本次实际返回的普通记忆沿持久化 memory_edges 带一跳关联记忆; embedding 相似边只是检索/图谱参考,不是可手写的记忆关系。
+    默认只从本次命中的普通记忆沿持久化 memory_edges 带一跳联想浮现; embedding 相似边只是检索/图谱参考,不是可手写的记忆关系。
     如果夜梦与当前语境共振,breath 会追加 ===== 梦境 ===== 块;梦只浮现一次。
-    include_core/core_limit 控制 pinned/protected 核心准则数量; include_related=False 可关闭关联记忆块。
+    include_core/core_limit 控制 pinned/protected 核心准则数量; include_related=False 可关闭联想浮现块。
     """
     await decay_engine.ensure_started()
     max_results = _int_between(max_results, 20, 1, 50)
@@ -1396,6 +2730,7 @@ async def breath(
     include_core = _bool_value(include_core, True)
     core_limit = _int_between(core_limit, 3, 0, 20)
     is_session_start = _bool_value(is_session_start, False)
+    debug = _bool_value(debug, False)
     domain_key = domain.strip().lower()
 
     # --- Feel/whisper retrieval: independent read-only channels ---
@@ -1567,13 +2902,14 @@ async def breath(
         related_block = ""
         related_sources = anchor_buckets + surfaced_buckets
         if include_related and related_sources:
-            related_header_tokens = count_tokens_approx("=== 关联记忆 ===\n")
-            related_block = await _build_mcp_related_memory_block(
+            related_header_tokens = count_tokens_approx("=== 联想浮现 ===\n")
+            related_block = await _build_mcp_diffused_memory_block(
                 related_sources,
                 all_buckets,
                 max(0, token_budget - related_header_tokens),
                 related_per_memory,
                 edge_min_confidence,
+                "",
             )
 
         parts = []
@@ -1584,7 +2920,7 @@ async def breath(
         if dynamic_results:
             parts.append("=== 浮现记忆 ===\n" + "\n---\n".join(dynamic_results))
         if related_block:
-            parts.append("=== 关联记忆 ===\n" + related_block)
+            parts.append("=== 联想浮现 ===\n" + related_block)
 
         dream_block = await dream_engine.surface_for_breath(
             query="",
@@ -1605,10 +2941,11 @@ async def breath(
     domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
     q_valence = valence if 0 <= valence <= 1 else None
     q_arousal = arousal if 0 <= arousal <= 1 else None
+    search_query = recall_search_query(query, _recall_relevance_options())
 
     try:
         matches = await bucket_mgr.search(
-            query,
+            search_query,
             limit=max(max_results, 20),
             domain_filter=domain_filter,
             query_valence=q_valence,
@@ -1618,76 +2955,171 @@ async def breath(
         logger.error(f"Search failed / 检索失败: {e}")
         return "检索过程出错，请稍后重试。"
 
+    seed_diagnostics: dict[str, dict] = {}
+    for bucket in matches:
+        _upsert_breath_seed_diagnostic(
+            seed_diagnostics,
+            bucket,
+            "keyword",
+            bucket_search_score=bucket.get("score"),
+        )
+
     # --- Vector similarity channel: find semantically related buckets ---
     # --- 向量相似度通道：找到语义相关的桶 ---
+    recall_thresholds = _breath_recall_thresholds(query, max_results)
     matched_ids = {b["id"] for b in matches}
     try:
-        vector_results = await embedding_engine.search_similar(query, top_k=max(max_results, 20))
+        vector_results = await embedding_engine.search_similar(
+            search_query,
+            top_k=int(recall_thresholds["semantic_top_k"]),
+        )
         for bucket_id, sim_score in vector_results:
-            if bucket_id not in matched_ids and sim_score > 0.5:
+            if bucket_id in seed_diagnostics:
+                seed_diagnostics[bucket_id]["embedding_score"] = round(float(sim_score), 4)
+            if bucket_id not in matched_ids and sim_score >= recall_thresholds["vector_min_score"]:
                 bucket = await bucket_mgr.get(bucket_id)
                 if bucket:
                     if bucket.get("metadata", {}).get("type") == "feel":
                         continue
                     bucket["score"] = round(sim_score * 100, 2)
                     bucket["vector_match"] = True
+                    _upsert_breath_seed_diagnostic(
+                        seed_diagnostics,
+                        bucket,
+                        "vector",
+                        embedding_score=sim_score,
+                    )
                     matches.append(bucket)
                     matched_ids.add(bucket_id)
     except Exception as e:
         logger.warning(f"Vector search failed, using keyword only / 向量搜索失败: {e}")
 
-    results = []
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+    except Exception as e:
+        logger.warning(f"Failed to list buckets for moment recall / moment 召回列桶失败: {e}")
+        all_buckets = matches
+
+    bucket_map = {bucket["id"]: bucket for bucket in all_buckets if bucket.get("id")}
+    _, grouped_moments, _ = await _refresh_moment_graph(all_buckets)
+    bucket_boosts = seed_scores_for_buckets(matches)
+    moment_candidates = memory_moment_store.search_moments(
+        search_query,
+        limit=max(max_results, 20),
+        bucket_boosts=bucket_boosts,
+    )
+    moment_candidates = _direct_recallable_moments(moment_candidates)
+    pre_gate_moment_candidates = list(moment_candidates)
+    gated_moment_candidates = _apply_recall_relevance_gate(query, moment_candidates)
+    moment_candidates = gated_moment_candidates
+    moment_candidates = await _rerank_breath_moment_candidates(query, moment_candidates)
+    reranked_moment_candidates = list(moment_candidates)
+    admitted_moments = []
+    suppressed_moments = []
+    for moment in moment_candidates:
+        admission = _breath_moment_admission_decision(query, moment, seed_diagnostics)
+        item = dict(moment)
+        item["_admission_reason"] = admission.reason
+        if admission.admit:
+            admitted_moments.append(item)
+        else:
+            suppressed_moments.append(item)
+    moment_candidates = admitted_moments
+
+    direct_results = []
     token_used = 0
-    returned_buckets = []
-    for bucket in matches:
+    returned_moments = moment_candidates[:max_results]
+    direct_display_limit = 1 if include_related else max_results
+    displayed_bucket_ids: set[str] = set()
+    displayed_moment_ids: list[str] = []
+    for moment in returned_moments:
+        if len(direct_results) >= direct_display_limit:
+            break
         if token_used >= max_tokens:
             break
+        bucket_id = str(moment.get("bucket_id") or "")
+        if bucket_id in displayed_bucket_ids:
+            continue
         try:
-            if bucket.get("metadata", {}).get("type") == "feel":
-                continue
-            clean_meta = {k: v for k, v in bucket["metadata"].items() if k != "tags"}
-            # --- Memory reconstruction: shift displayed valence by current mood ---
-            # --- 记忆重构：根据当前情绪微调展示层 valence（±0.1）---
-            if q_valence is not None and "valence" in clean_meta:
-                original_v = float(clean_meta.get("valence", 0.5))
-                shift = (q_valence - 0.5) * 0.2  # ±0.1 max shift
-                clean_meta["valence"] = max(0.0, min(1.0, original_v + shift))
-            summary = await dehydrator.dehydrate(_bucket_text_for_embedding(bucket), clean_meta)
-            if bucket.get("vector_match"):
-                entry = f"[语义关联] [bucket_id:{bucket['id']}] {summary}"
-            else:
-                entry = f"[bucket_id:{bucket['id']}] {summary}"
+            entry = _format_direct_moment(moment, grouped_moments, max_tokens - token_used)
+            if not entry:
+                break
             entry_tokens = count_tokens_approx(entry)
             if token_used + entry_tokens > max_tokens:
                 break
-            await bucket_mgr.touch(bucket["id"])
-            results.append(entry)
-            returned_buckets.append(bucket)
+            await bucket_mgr.touch(bucket_id)
+            displayed_bucket_ids.add(bucket_id)
+            displayed_moment_ids.append(str(moment.get("moment_id") or ""))
+            direct_results.append(entry)
             token_used += entry_tokens
         except Exception as e:
-            logger.warning(f"Failed to dehydrate search result / 检索结果脱水失败: {e}")
+            logger.warning(f"Failed to render direct moment / 直接命中片段渲染失败: {e}")
             continue
 
-    if include_related and returned_buckets:
-        related_header = "=== 关联记忆 ===\n"
+    related_entry = ""
+    secondary_moment_ids: list[str] = []
+    related_source_bucket_ids: list[str] = []
+    if include_related and returned_moments:
+        related_header = "=== 联想浮现 ===\n"
         related_budget = max_tokens - token_used - count_tokens_approx(related_header)
-        related_block = await _build_mcp_related_memory_block(
-            returned_buckets,
-            None,
+        related_parts = []
+        secondary_moments = _secondary_direct_moments(
+            query,
+            returned_moments,
+            displayed_bucket_ids,
+            _secondary_direct_limit(query, related_per_memory),
+        )
+        for moment in secondary_moments:
+            if related_budget <= 0:
+                break
+            block = _format_secondary_direct_moment(moment)
+            block_tokens = count_tokens_approx(block)
+            if block_tokens > related_budget:
+                break
+            related_parts.append(block)
+            secondary_moment_ids.append(str(moment.get("moment_id") or ""))
+            related_budget -= block_tokens
+
+        related_source_buckets = []
+        seen_source_bucket_ids = set()
+        for moment in returned_moments:
+            bucket_id = str(moment.get("bucket_id") or "")
+            if bucket_id not in displayed_bucket_ids:
+                continue
+            bucket = bucket_map.get(bucket_id)
+            if not bucket or bucket_id in seen_source_bucket_ids:
+                continue
+            related_source_buckets.append(bucket)
+            related_source_bucket_ids.append(bucket_id)
+            seen_source_bucket_ids.add(bucket_id)
+
+        related_block = await _build_mcp_diffused_memory_block(
+            related_source_buckets,
+            all_buckets,
             max(0, related_budget),
             related_per_memory,
             edge_min_confidence,
+            query_text=query,
+            exclude_bucket_ids={str(moment.get("bucket_id") or "") for moment in secondary_moments},
         )
         if related_block:
-            related_entry = related_header + related_block
-            results.append(related_entry)
+            related_parts.append(related_block)
+        if related_parts:
+            related_entry = related_header + "\n---\n".join(related_parts)
             token_used += count_tokens_approx(related_entry)
 
+    drift_entry = ""
     # --- Resurface: when search returns < 3, 40% chance to float dormant memories ---
     # --- 久未触碰浮现：检索结果不足 3 条时，40% 概率漂起旧桶 ---
-    if len(returned_buckets) < 3 and max_tokens > token_used and random.random() < 0.4:
+    if (
+        not related_entry
+        and len(returned_moments) < 3
+        and not recall_thresholds.get("has_explicit_entity")
+        and max_tokens > token_used
+        and random.random() < 0.4
+    ):
         try:
-            matched_ids = {b["id"] for b in returned_buckets}
+            matched_ids = {str(moment.get("bucket_id")) for moment in returned_moments}
             drifted = await _select_resurface_buckets(
                 max_results=random.randint(1, 3),
                 exclude_ids=matched_ids,
@@ -1715,8 +3147,9 @@ async def breath(
                 if drift_results:
                     drift_entry = "--- 久未碰过 ---\n" + "\n---\n".join(drift_results)
                     if token_used + count_tokens_approx(drift_entry) <= max_tokens:
-                        results.append(drift_entry)
                         token_used += count_tokens_approx(drift_entry)
+                    else:
+                        drift_entry = ""
         except Exception as e:
             logger.warning(f"Resurface failed / 久未触碰浮现失败: {e}")
 
@@ -1728,10 +3161,50 @@ async def breath(
         embedding_engine=embedding_engine,
     )
 
-    if not results:
+    response_parts = []
+    response_sections = []
+    if direct_results:
+        response_parts.append("=== 直接命中记忆 ===\n" + "\n---\n".join(direct_results))
+        response_sections.append("direct")
+    if related_entry:
+        response_parts.append(related_entry)
+        response_sections.append("related")
+    if drift_entry:
+        response_parts.append(drift_entry)
+        response_sections.append("drift")
+    if dream_block:
+        response_sections.append("dream")
+
+    _write_breath_recall_diagnostics(
+        query=query,
+        recall_thresholds=recall_thresholds,
+        seed_diagnostics=seed_diagnostics,
+        pre_gate_candidates=pre_gate_moment_candidates,
+        gated_candidates=gated_moment_candidates,
+        reranked_candidates=reranked_moment_candidates,
+        returned_moments=returned_moments,
+        suppressed_candidates=suppressed_moments,
+        displayed_moment_ids=displayed_moment_ids,
+        secondary_moment_ids=secondary_moment_ids,
+        related_source_bucket_ids=related_source_bucket_ids,
+        related_included=bool(related_entry),
+        drift_included=bool(drift_entry),
+        dream_included=bool(dream_block),
+        response_sections=response_sections,
+    )
+
+    if debug and suppressed_moments:
+        response_parts.append(
+            "=== suppressed_candidates ===\n"
+            + "\n".join(_format_suppressed_recall_candidate(moment, seed_diagnostics) for moment in suppressed_moments[:10])
+        )
+
+    if not response_parts:
+        if recall_thresholds.get("has_explicit_entity") and suppressed_moments:
+            return dream_block or "没有找到可靠命中。"
         return dream_block or "未找到相关记忆。"
 
-    response_text = "\n---\n".join(results)
+    response_text = "\n\n".join(response_parts)
     if dream_block:
         response_text += "\n\n" + dream_block
     return response_text
@@ -2128,17 +3601,65 @@ async def hold(
 # Tool 3: grow — Grow, fragments become memories
 # 工具 3：grow — 生长，一天的碎片长成记忆
 # =============================================================
+def _format_write_gate_result(decision: WriteGateDecision) -> str:
+    reason = ",".join(decision.reasons) or "no_reason"
+    repeat = f"{decision.repeat_count + 1}/{memory_write_gate.repeat_promote_count}"
+    return (
+        f"门卫→{decision.decision} "
+        f"score={decision.surprise_score:.2f} "
+        f"repeat={repeat} "
+        f"candidate={decision.candidate_id} "
+        f"reason={reason}"
+    )
+
+
+def _grow_source_from_context(context: Context | None) -> str:
+    if context is None:
+        return ""
+    try:
+        client_info = context.request_context.session.client_params.clientInfo
+    except Exception:
+        return ""
+    name = str(getattr(client_info, "name", "") or "").strip().lower()
+    if "ob-auto-grow" in name:
+        return "operit"
+    if "operit" in name:
+        return "operit"
+    return ""
+
+
+def _looks_like_operit_auto_grow_content(content: str) -> bool:
+    return bool(re.match(r"^【\d{4}-\d{2}-\d{2} \d{2}:\d{2}】\s*\n", str(content or "")))
+
+
 @mcp.tool()
-async def grow(content: str) -> str:
+async def grow(content: str, auto: bool = False, source: str = "", context: Context | None = None) -> str:
     """长内容摘记: 只给已经筛过、包含多个长期记忆点的片段; 不要把整篇日终日记、一天流水或完整情绪过程丢进来。
     content 应该是少量可长期召回的事实/偏好/承诺/项目状态; 服务端会拆成少量 bucket、写 embedding,并后台触发 enrich。
     如果只有单条明确事实,优先用 hold。若要给旧记忆追加年轮/喜欢原因,优先用 comment_bucket；若要改正文,先 read_bucket 再 trace(content=完整新正文)。
+    Operit/worker 等自动总结入口传 source="operit" 或 auto=True，会先过轻量 surprise 门卫：低分只记日志，中分 pending，足够高或重复出现才真正写入。
     短内容(<30字)会走 hold-like 快速路径。
     """
     await decay_engine.ensure_started()
 
     if not content or not content.strip():
         return "内容为空，无法整理。"
+
+    auto = _bool_value(auto, False)
+    source = str(source or "").strip() or _grow_source_from_context(context)
+    if not source and _looks_like_operit_auto_grow_content(content):
+        source = "operit"
+    gate_decision = None
+    if memory_write_gate.should_gate(auto=auto, source=source):
+        gate_decision = await memory_write_gate.evaluate(
+            content,
+            source=source,
+            bucket_mgr=bucket_mgr,
+            auto=auto,
+        )
+        if not gate_decision.allow:
+            return _format_write_gate_result(gate_decision)
+    gate_prefix = f"{_format_write_gate_result(gate_decision)}\n" if gate_decision else ""
 
     # --- Short content fast path: skip digest, use hold logic directly ---
     # --- 短内容快速路径：跳过 digest 拆分，直接走 hold 逻辑省一次 API ---
@@ -2171,17 +3692,17 @@ async def grow(content: str) -> str:
         _queue_memory_enrichment(bucket_id)
         action = "合并" if is_merged else "新建"
         related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
-        return f"{action} → {result_name} | {','.join(analysis.get('domain', []))} V{analysis.get('valence', 0.5):.1f}/A{analysis.get('arousal', 0.3):.1f}{related_note}"
+        return f"{gate_prefix}{action} → {result_name} | {','.join(analysis.get('domain', []))} V{analysis.get('valence', 0.5):.1f}/A{analysis.get('arousal', 0.3):.1f}{related_note}"
 
     # --- Step 1: let API split and organize / 让 API 拆分整理 ---
     try:
         items = await dehydrator.digest(content)
     except Exception as e:
         logger.error(f"Memory digest failed / 长内容摘记失败: {e}")
-        return f"长内容摘记失败: {e}"
+        return f"{gate_prefix}长内容摘记失败: {e}"
 
     if not items:
-        return "内容为空或整理失败。"
+        return f"{gate_prefix}内容为空或整理失败。"
 
     results = []
     created = 0
@@ -2219,7 +3740,136 @@ async def grow(content: str) -> str:
             )
             results.append(f"⚠️{item.get('name', '?')}")
 
-    return f"{len(items)}条|新{created}合{merged}\n" + "\n".join(results)
+    return f"{gate_prefix}{len(items)}条|新{created}合{merged}\n" + "\n".join(results)
+
+
+# =============================================================
+# Tool 3.5: profile_fact — manually solidify a user/profile fact
+# 工具 3.5：profile_fact — 手动固化画像事实
+# =============================================================
+@mcp.tool()
+async def profile_fact(
+    fact: str,
+    evidence_bucket_id: str,
+    profile_kind: str = "preference",
+    subject: str = "user",
+    predicate: str = "",
+    object_value: str = "",
+    evidence_moment_id: str = "",
+    evidence_context: str = "",
+    reflection: str = "",
+    followup: str = "",
+    confidence: float = 0.9,
+) -> str:
+    """手动写入一条画像事实，并强制关联证据桶。先有事件桶，再用这个工具固化稳定偏好/事实。"""
+    fact = str(fact or "").strip()
+    evidence_bucket_id = str(evidence_bucket_id or "").strip()
+    if not fact:
+        return "fact 为空，无法写入画像事实。"
+    if not evidence_bucket_id or not MEMORY_ID_RE.fullmatch(evidence_bucket_id):
+        return "请提供有效的 evidence_bucket_id。"
+
+    evidence_bucket = await bucket_mgr.get(evidence_bucket_id)
+    if not evidence_bucket:
+        return f"证据记忆桶不存在: {evidence_bucket_id}"
+
+    evidence_moment_id = str(evidence_moment_id or "").strip()
+    if evidence_moment_id and not MEMORY_ID_RE.fullmatch(evidence_moment_id):
+        return "evidence_moment_id 无效。"
+    if not evidence_moment_id:
+        try:
+            evidence_moments = memory_moment_store.upsert_bucket(evidence_bucket)
+            representative = _representative_moment(evidence_moments)
+            evidence_moment_id = str((representative or {}).get("moment_id") or "")
+        except Exception as e:
+            logger.warning("Profile fact evidence moment indexing failed: %s", e)
+            evidence_moment_id = ""
+
+    kind = _profile_key(profile_kind, "preference")
+    subject_key = _profile_key(subject, "user")
+    predicate_key = _profile_key(predicate, "")
+    object_text = str(object_value or "").strip()
+    confidence = _float_between(confidence, 0.9, 0.0, 1.0)
+    body = _profile_fact_body(
+        fact=fact,
+        evidence_context=evidence_context,
+        reflection=reflection,
+        followup=followup,
+    )
+    tags = ["profile_fact", f"profile_{kind}"]
+    if predicate_key:
+        tags.append(f"profile_predicate_{predicate_key}")
+    evidence = {"bucket_id": evidence_bucket_id}
+    if evidence_moment_id:
+        evidence["moment_id"] = evidence_moment_id
+
+    bucket_id = await bucket_mgr.create(
+        content=body,
+        tags=list(dict.fromkeys(tags)),
+        importance=8,
+        domain=list(dict.fromkeys(["profile", kind])),
+        valence=0.5,
+        arousal=0.3,
+        name=_profile_fact_name(fact),
+        bucket_type="permanent",
+        confidence=confidence,
+        source="profile_fact",
+        extra_metadata={
+            "profile_kind": kind,
+            "subject": subject_key,
+            "predicate": predicate_key,
+            "object": object_text,
+            "evidence": [evidence],
+        },
+    )
+    edge = memory_edge_store.add_edge(
+        bucket_id,
+        evidence_bucket_id,
+        "evidenced_by",
+        confidence=confidence,
+        reason="profile fact evidence",
+    )
+    _queue_embedding_refresh(bucket_id)
+    try:
+        created_bucket = await bucket_mgr.get(bucket_id)
+        if created_bucket:
+            memory_moment_store.upsert_bucket(created_bucket)
+    except Exception as e:
+        logger.warning("Profile fact moment indexing failed: %s", e)
+
+    edge_note = " + evidenced_by" if edge else ""
+    moment_note = f" moment={evidence_moment_id}" if evidence_moment_id else ""
+    return f"profile_fact→{bucket_id} evidence→{evidence_bucket_id}{moment_note}{edge_note}"
+
+
+def _profile_fact_body(
+    *,
+    fact: str,
+    evidence_context: str = "",
+    reflection: str = "",
+    followup: str = "",
+) -> str:
+    sections = [("fact", fact)]
+    if str(evidence_context or "").strip():
+        sections.append(("evidence_context", str(evidence_context).strip()))
+    if str(reflection or "").strip():
+        sections.append(("reflection", str(reflection).strip()))
+    if str(followup or "").strip():
+        sections.append(("followup", str(followup).strip()))
+    return "\n\n".join(f"### {heading}\n{text.strip()}" for heading, text in sections)
+
+
+def _profile_key(value: str, default: str) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    text = re.sub(r"\s+", "_", text)
+    text = re.sub(r"[^0-9a-zA-Z_\-\u4e00-\u9fff]+", "", text)
+    return text or default
+
+
+def _profile_fact_name(fact: str) -> str:
+    return "画像事实：" + _clip_text(fact, 48)
 
 
 # =============================================================
@@ -2411,12 +4061,29 @@ async def pulse(include_archive: bool = False) -> str:
 # Claude then decides: resolve some, write feels, or do nothing.
 # =============================================================
 @mcp.tool()
-async def introspection() -> str:
+async def introspection(
+    limit: int = 10,
+    offset: int = 0,
+    created_date: str = "",
+    created_from: str = "",
+    created_to: str = "",
+) -> str:
     """读取最近普通记忆供 AI 清醒自省,不是梦境生成,也不是日记整理。
     读后只在真的可以放下时 trace(resolved=1/digested=1),或在产生新的第一人称沉淀/喜欢原因时 comment_bucket(bucket_id, content)。
+    limit/offset 可翻看更早的普通记忆; introspection(offset=10) 读取下一页。
+    created_date="YYYY-MM-DD" 可读取某一天; created_from/created_to 可读取日期范围。
     不要把 introspection 返回内容直接再写成普通 bucket。
     """
     await decay_engine.ensure_started()
+    limit = _int_between(limit, 10, 1, 30)
+    offset = _int_between(offset, 0, 0, 10000)
+    date_args = {
+        "created_date": created_date,
+        "created_from": created_from,
+        "created_to": created_to,
+    }
+    if any(str(value or "").strip() and not _date_key(value) for value in date_args.values()):
+        return '创建日期格式请用 YYYY-MM-DD, 例如 introspection(created_date="2026-05-24")。'
 
     try:
         all_buckets = await bucket_mgr.list_all(include_archive=False)
@@ -2432,11 +4099,20 @@ async def introspection() -> str:
         and not b["metadata"].get("protected", False)
     ]
 
-    # --- Sort by creation time desc, take top 10 ---
+    candidates, date_filter_label = _filter_by_created_date(
+        candidates,
+        created_date=created_date,
+        created_from=created_from,
+        created_to=created_to,
+    )
+
+    # --- Sort by creation time desc, take requested page ---
     candidates.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
-    recent = candidates[:10]
+    recent = candidates[offset : offset + limit]
 
     if not recent:
+        if date_filter_label:
+            return "这个创建日期范围内没有需要消化的新记忆。"
         return "没有需要消化的新记忆。"
 
     parts = []
@@ -2457,7 +4133,7 @@ async def introspection() -> str:
 
     header = (
         "=== Introspection ===\n"
-        "以下是你最近的记忆。用第一人称想：\n"
+        f"以下是你最近的普通记忆（offset={offset}, limit={limit}{date_filter_label}）。用第一人称想：\n"
         "- 这些东西里有什么在你这里留下了重量？\n"
         "- 有什么还没想清楚？\n"
         "- 有什么可以放下了？\n"
@@ -2529,7 +4205,150 @@ async def introspection() -> str:
         except Exception as e:
             logger.warning(f"Introspection crystallization hint failed: {e}")
 
-    return header + "\n---\n".join(parts) + connection_hint + crystal_hint
+    profile_hint = _profile_fact_candidate_hint(recent, all_buckets)
+
+    return header + "\n---\n".join(parts) + connection_hint + crystal_hint + profile_hint
+
+
+PROFILE_FACT_CANDIDATE_PATTERNS = (
+    ("preference", "likes", "喜欢", re.compile(r"(?:小雨|池又雨|用户|她)\s*(?:很|最|一直|特别|偏)?喜欢\s*([^。；;，,\n]{1,32})")),
+    ("preference", "dislikes", "不喜欢", re.compile(r"(?:小雨|池又雨|用户|她)\s*(?:很|最|一直|特别)?不喜欢\s*([^。；;，,\n]{1,32})")),
+    ("preference", "dislikes", "讨厌", re.compile(r"(?:小雨|池又雨|用户|她)\s*(?:很|最|一直|特别)?讨厌\s*([^。；;，,\n]{1,32})")),
+    ("preference", "dislikes", "厌恶", re.compile(r"(?:小雨|池又雨|用户|她)\s*(?:很|最|一直|特别)?厌恶\s*([^。；;，,\n]{1,32})")),
+    ("preference", "fears", "害怕", re.compile(r"(?:小雨|池又雨|用户|她)\s*(?:很|最|一直|特别)?害怕\s*([^。；;，,\n]{1,32})")),
+    ("preference", "prefers", "偏好", re.compile(r"(?:小雨|池又雨|用户|她)\s*偏好\s*([^。；;，,\n]{1,32})")),
+    ("boundary", "boundary", "雷点", re.compile(r"(?:小雨|池又雨|用户|她)的?雷点是\s*([^。；;，,\n]{1,32})")),
+    ("habit", "habit", "习惯", re.compile(r"(?:小雨|池又雨|用户|她)(?:有个)?习惯是\s*([^。；;，,\n]{1,32})")),
+)
+
+
+BASE_NOISY_PROFILE_OBJECT_KEYS = {
+    "哥哥",
+    "老公",
+    "宝宝",
+    "宝贝",
+    "老婆",
+    "亲爱的",
+    "你",
+    "你啦",
+    "你呀",
+}
+
+
+def _profile_fact_candidate_hint(recent: list[dict], all_buckets: list[dict]) -> str:
+    existing = _existing_profile_fact_keys(all_buckets)
+    candidates = []
+    seen = set()
+    for bucket in recent:
+        if len(candidates) >= 3:
+            break
+        meta = bucket.get("metadata", {}) or {}
+        if "profile_fact" in {str(tag) for tag in meta.get("tags", []) or []}:
+            continue
+        text = strip_wikilinks(_bucket_text_for_embedding(bucket))
+        for kind, predicate, verb, pattern in PROFILE_FACT_CANDIDATE_PATTERNS:
+            match = pattern.search(text)
+            if not match:
+                continue
+            obj = _clean_profile_object(match.group(1))
+            if not obj:
+                continue
+            if _is_noisy_profile_object(predicate, obj):
+                continue
+            fact = _render_profile_fact_candidate(predicate, verb, obj)
+            key = _normalize_profile_fact_key(fact)
+            if key in existing or key in seen:
+                continue
+            seen.add(key)
+            candidates.append(
+                {
+                    "fact": fact,
+                    "bucket_id": bucket.get("id", ""),
+                    "profile_kind": kind,
+                    "predicate": predicate,
+                    "object_value": obj,
+                    "evidence_context": _clip_text(text, 180),
+                }
+            )
+            break
+    if not candidates:
+        return ""
+
+    lines = [
+        "\n=== 可能值得固化的画像事实 ===",
+        "只作为候选，不会自动写入；确认后再调用 profile_fact(...)。",
+    ]
+    for item in candidates:
+        args = [
+            f"fact={_literal_arg(item['fact'])}",
+            f"evidence_bucket_id={_literal_arg(item['bucket_id'])}",
+            f"profile_kind={_literal_arg(item['profile_kind'])}",
+            f"predicate={_literal_arg(item['predicate'])}",
+            f"object_value={_literal_arg(item['object_value'])}",
+            f"evidence_context={_literal_arg(item['evidence_context'])}",
+        ]
+        lines.append(
+            f"- {item['fact']}\n"
+            f"  证据桶: {item['bucket_id']}\n"
+            f"  建议: profile_fact({', '.join(args)})"
+        )
+    return "\n" + "\n".join(lines) + "\n"
+
+
+def _existing_profile_fact_keys(buckets: list[dict]) -> set[str]:
+    keys = set()
+    for bucket in buckets or []:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        tags = {str(tag) for tag in meta.get("tags", []) or []}
+        if "profile_fact" not in tags and not meta.get("profile_kind"):
+            continue
+        content = str(bucket.get("content") or "")
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                keys.add(_normalize_profile_fact_key(stripped))
+                break
+    return keys
+
+
+def _render_profile_fact_candidate(predicate: str, verb: str, obj: str) -> str:
+    if predicate == "boundary":
+        return f"小雨的雷点是{obj}。"
+    if predicate == "habit":
+        return f"小雨的习惯是{obj}。"
+    return f"小雨{verb}{obj}。"
+
+
+def _clean_profile_object(value: str) -> str:
+    text = strip_wikilinks(str(value or "")).strip()
+    text = re.sub(r"^[“\"'「『（(]+|[”\"'」』）)]+$", "", text)
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"(这件事|这个设定|这类东西|的时候)$", "", text)
+    return text[:32].strip("。；;，,、 ")
+
+
+def _is_noisy_profile_object(predicate: str, obj: str) -> bool:
+    key = _normalize_profile_fact_key(obj)
+    if not key or len(key) <= 1:
+        return True
+    return predicate in {"likes", "dislikes", "prefers"} and key in _noisy_profile_object_keys()
+
+
+def _noisy_profile_object_keys() -> set[str]:
+    keys = set(BASE_NOISY_PROFILE_OBJECT_KEYS)
+    ai_name = str(_identity().get("ai_name") or "").strip()
+    if ai_name:
+        keys.add(ai_name)
+        keys.add(f"小{ai_name}")
+    return {_normalize_profile_fact_key(key) for key in keys if str(key or "").strip()}
+
+
+def _normalize_profile_fact_key(value: str) -> str:
+    return re.sub(r"[\s。；;，,、：:\"'“”‘’「」『』]+", "", str(value or "").lower())
+
+
+def _literal_arg(value: str) -> str:
+    return _json_lib.dumps(str(value or ""), ensure_ascii=False)
 
 
 @mcp.tool()

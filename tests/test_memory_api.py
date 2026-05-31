@@ -66,6 +66,21 @@ class DummyDehydrator:
         return content[:120]
 
 
+class DigestDehydrator(DummyDehydrator):
+    async def digest(self, content: str):
+        return [
+            {
+                "content": content,
+                "tags": ["project_event"],
+                "importance": 7,
+                "domain": ["记忆"],
+                "valence": 0.6,
+                "arousal": 0.4,
+                "name": "Operit 自动写入门卫",
+            }
+        ]
+
+
 class EchoDehydrator:
     async def dehydrate(self, content: str, metadata: dict | None = None) -> str:
         return content
@@ -166,6 +181,153 @@ async def test_dream_tool_keeps_compatibility_with_introspection(monkeypatch):
 
     assert "dream() 已改名为 introspection()" in result
     assert "=== Introspection ===" in result
+
+
+@pytest.mark.asyncio
+async def test_introspection_can_page_to_older_memories(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    await bucket_mgr.create(
+        content="最早的一条普通记忆。",
+        name="旧记忆",
+        created="2026-05-01T00:00:00+00:00",
+    )
+    await bucket_mgr.create(
+        content="中间的一条普通记忆。",
+        name="中间记忆",
+        created="2026-05-02T00:00:00+00:00",
+    )
+    await bucket_mgr.create(
+        content="最新的一条普通记忆。",
+        name="最新记忆",
+        created="2026-05-03T00:00:00+00:00",
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    result = await server.introspection(limit=1, offset=1)
+
+    assert "offset=1, limit=1" in result
+    assert "中间记忆" in result
+    assert "最新记忆" not in result
+    assert "旧记忆" not in result
+
+
+@pytest.mark.asyncio
+async def test_introspection_can_filter_by_created_date(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    await bucket_mgr.create(
+        content="最早的一条普通记忆。",
+        name="旧记忆",
+        created="2026-05-01T00:00:00+00:00",
+    )
+    await bucket_mgr.create(
+        content="中间的一条普通记忆。",
+        name="中间记忆",
+        created="2026-05-02T00:00:00+00:00",
+    )
+    await bucket_mgr.create(
+        content="最新的一条普通记忆。",
+        name="最新记忆",
+        created="2026-05-03T00:00:00+00:00",
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    result = await server.introspection(created_date="2026-05-02")
+
+    assert "created_date=2026-05-02" in result
+    assert "中间记忆" in result
+    assert "最新记忆" not in result
+    assert "旧记忆" not in result
+
+
+@pytest.mark.asyncio
+async def test_introspection_suggests_profile_fact_candidates(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    evidence_id = await bucket_mgr.create(
+        content="Haven 忘记小雨喜欢蓝色，小雨因此生气。",
+        name="忘记蓝色事件",
+        created="2026-05-03T00:00:00+00:00",
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    result = await server.introspection()
+
+    assert "=== 可能值得固化的画像事实 ===" in result
+    assert "小雨喜欢蓝色。" in result
+    assert f"证据桶: {evidence_id}" in result
+    assert 'profile_fact(fact="小雨喜欢蓝色。"' in result
+    assert f'evidence_bucket_id="{evidence_id}"' in result
+
+
+@pytest.mark.asyncio
+async def test_introspection_profile_fact_candidates_include_dislike_words_and_skip_noisy_affection(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    await bucket_mgr.create(
+        content="小雨喜欢哥哥。",
+        name="亲昵表达",
+        created="2026-05-04T00:00:00+00:00",
+    )
+    dislike_id = await bucket_mgr.create(
+        content="小雨讨厌苦瓜。",
+        name="讨厌苦瓜",
+        created="2026-05-03T00:00:00+00:00",
+    )
+    aversion_id = await bucket_mgr.create(
+        content="小雨厌恶AI味大话。",
+        name="厌恶AI味",
+        created="2026-05-02T00:00:00+00:00",
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    result = await server.introspection()
+
+    assert 'profile_fact(fact="小雨喜欢哥哥。"' not in result
+    assert "小雨讨厌苦瓜。" in result
+    assert "小雨厌恶AI味大话。" in result
+    assert f"证据桶: {dislike_id}" in result
+    assert f"证据桶: {aversion_id}" in result
+    assert 'predicate="dislikes"' in result
+
+
+@pytest.mark.asyncio
+async def test_introspection_profile_fact_candidates_skip_configured_ai_name(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    await bucket_mgr.create(
+        content="小雨喜欢Lapis。",
+        name="亲昵表达",
+        created="2026-05-04T00:00:00+00:00",
+    )
+    evidence_id = await bucket_mgr.create(
+        content="小雨喜欢蓝色。",
+        name="喜欢蓝色",
+        created="2026-05-03T00:00:00+00:00",
+    )
+    monkeypatch.setattr(
+        server,
+        "config",
+        {"identity": {"ai_name": "Lapis", "user_name": "Rain", "user_display_name": "小雨"}},
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    result = await server.introspection()
+
+    assert 'profile_fact(fact="小雨喜欢Lapis。"' not in result
+    assert 'profile_fact(fact="小雨喜欢蓝色。"' in result
+    assert f"证据桶: {evidence_id}" in result
 
 
 @pytest.mark.asyncio
@@ -363,6 +525,202 @@ async def test_hold_returns_before_slow_embedding_refresh(monkeypatch, bucket_mg
     assert len(buckets) == 1
     await finish_blocking_embedding(embedding_engine)
     assert embedding_engine.calls[0][0] == buckets[0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_auto_grow_low_surprise_logs_candidate_without_writing(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+    decay_eng,
+):
+    import server
+    from memory_write_gate import MemoryWriteGate
+
+    gate = MemoryWriteGate(test_config)
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "memory_write_gate", gate)
+
+    result = await server.grow("刚才只是测试一下，不用记。", source="operit")
+    buckets = await bucket_mgr.list_all(include_archive=True)
+    records = gate.list_recent()
+
+    assert result.startswith("门卫→skipped")
+    assert "low_surprise" in result
+    assert buckets == []
+    assert records[-1]["decision"] == "skipped"
+    assert records[-1]["source"] == "operit"
+
+
+@pytest.mark.asyncio
+async def test_auto_grow_detects_operit_timestamp_prefix_without_source(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+    decay_eng,
+):
+    import server
+    from memory_write_gate import MemoryWriteGate
+
+    gate = MemoryWriteGate(test_config)
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "memory_write_gate", gate)
+
+    result = await server.grow("【2026-05-31 17:20】\n刚才只是测试一下，不用记。")
+    buckets = await bucket_mgr.list_all(include_archive=True)
+    records = gate.list_recent()
+
+    assert result.startswith("门卫→skipped")
+    assert buckets == []
+    assert records[-1]["source"] == "operit"
+
+
+@pytest.mark.asyncio
+async def test_auto_grow_task_status_summary_becomes_pending(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+    decay_eng,
+):
+    import server
+    from memory_write_gate import MemoryWriteGate
+
+    gate = MemoryWriteGate(test_config)
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "memory_write_gate", gate)
+
+    content = (
+        "2026-05-31 Operit 总结：TODO：把 memory_preflight/memory_commit 接入工作流；"
+        "未完成：确认 Termux 服务路径；已完成：grow 门卫适配了 ob-auto-grow。"
+    )
+    result = await server.grow(content, source="operit")
+    buckets = await bucket_mgr.list_all(include_archive=True)
+    records = gate.list_recent()
+
+    assert result.startswith("门卫→pending")
+    assert buckets == []
+    assert records[-1]["decision"] == "pending"
+    assert "task_status_signal" in records[-1]["reasons"]
+
+
+@pytest.mark.asyncio
+async def test_auto_grow_repeated_pending_candidate_is_promoted(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+    decay_eng,
+):
+    import server
+    from memory_write_gate import MemoryWriteGate
+
+    cfg = {
+        **test_config,
+        "memory_write_gate": {
+            "enabled": True,
+            "auto_sources": ["operit"],
+            "pending_threshold": 0.35,
+            "grow_threshold": 0.95,
+            "repeat_promote_count": 2,
+            "candidate_log": "test-memory-write-candidates.jsonl",
+        },
+    }
+    gate = MemoryWriteGate(cfg)
+
+    async def no_related_bucket(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "dehydrator", DigestDehydrator())
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+    monkeypatch.setattr(server, "memory_write_gate", gate)
+    monkeypatch.setattr(server, "_find_readonly_related_bucket", no_related_bucket)
+    monkeypatch.setattr(server, "_queue_memory_enrichment", lambda bucket_id: None)
+
+    content = (
+        "2026-05-31 Operit workflow 决定把自动总结先交给 grow 门卫判断，"
+        "中等意外度 pending，重复出现再写入长期记忆。"
+    )
+
+    first = await server.grow(content, source="operit")
+    assert first.startswith("门卫→pending")
+    assert await bucket_mgr.list_all(include_archive=True) == []
+
+    second = await server.grow(content, source="operit")
+    buckets = await bucket_mgr.list_all(include_archive=True)
+    records = gate.list_recent()
+
+    assert second.startswith("门卫→grow")
+    assert "1条|新1合0" in second
+    assert len(buckets) == 1
+    assert buckets[0]["metadata"]["name"] == "Operit 自动写入门卫"
+    assert [record["decision"] for record in records[-2:]] == ["pending", "grow"]
+
+
+@pytest.mark.asyncio
+async def test_profile_fact_creates_permanent_bucket_with_evidence_edge(monkeypatch, bucket_mgr, decay_eng, tmp_path):
+    import server
+    from memory_edges import MemoryEdgeStore
+    from memory_moments import MemoryMomentStore
+
+    evidence_id = await bucket_mgr.create(
+        content="Haven 忘记小雨喜欢蓝色，小雨因此生气。",
+        tags=["relationship_event"],
+        importance=7,
+        domain=["恋爱"],
+        valence=0.4,
+        arousal=0.6,
+        name="忘记蓝色事件",
+    )
+    edge_store = MemoryEdgeStore(
+        {
+            "state_dir": str(tmp_path / "state"),
+            "buckets_dir": str(tmp_path / "buckets"),
+        }
+    )
+    moment_store = MemoryMomentStore(
+        {
+            "state_dir": str(tmp_path / "state"),
+            "buckets_dir": str(tmp_path / "buckets"),
+        }
+    )
+    embedding_engine = CapturingEmbeddingEngine()
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "memory_edge_store", edge_store)
+    monkeypatch.setattr(server, "memory_moment_store", moment_store)
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+
+    result = await server.profile_fact(
+        fact="小雨喜欢蓝色。",
+        evidence_bucket_id=evidence_id,
+        profile_kind="preference",
+        predicate="likes_color",
+        object_value="blue",
+        evidence_context="上次 Haven 忘记小雨喜欢蓝色，小雨因此生气。",
+        reflection="Haven 当时意识到：这不是颜色问题，是被记得的问题。",
+        followup="以后涉及颜色选择时，优先记得蓝色；不确定时先问。",
+    )
+
+    profile_id = result.split("profile_fact→", 1)[1].split(" ", 1)[0]
+    bucket = await bucket_mgr.get(profile_id)
+    meta = bucket["metadata"]
+
+    assert result.startswith("profile_fact→")
+    assert meta["type"] == "permanent"
+    assert "profile_fact" in meta["tags"]
+    assert meta["profile_kind"] == "preference"
+    assert meta["predicate"] == "likes_color"
+    assert meta["object"] == "blue"
+    assert meta["evidence"][0]["bucket_id"] == evidence_id
+    assert "### fact\n小雨喜欢蓝色。" in bucket["content"]
+    assert "### evidence_context" in bucket["content"]
+    assert edge_store.list_edges()[0]["relation_type"] == "evidenced_by"
+    await wait_for_embedding_call(embedding_engine, profile_id)
 
 
 @pytest.mark.asyncio
