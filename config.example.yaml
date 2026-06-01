@@ -301,6 +301,9 @@ memory_diffusion:
   include_incoming: true
   max_paths_per_hit: 3
   relation_type_weights:
+    same_event: 1.15
+    context_of: 1.1
+    precedes: 1.0
     triggers: 1.0
     causes: 0.95
     updates: 0.9
@@ -394,6 +397,7 @@ reflection:
   relationship_weather_affect_anchor_enabled: true  # daily/weekly relationship weather keeps affect_anchor by default
   enrich_backfill_enabled: true      # hourly scheduler backfills missing tags/confidence/edges
   enrich_backfill_limit: 5           # max buckets to backfill per scheduler tick
+  edge_backfill_limit: 5             # default limit for manual edge_backfill; only writes memory_edges
   base_url: ""                    # empty = persona.base_url
   model: ""                       # empty = persona.model
   thinking_mode: ""               # empty = persona.thinking_mode

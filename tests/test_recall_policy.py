@@ -39,6 +39,38 @@ def test_broad_context_words_do_not_make_normal_chat_technical():
     assert policy.requires_topic_evidence("handoff 原文")
 
 
+def test_auto_vague_query_without_topic_is_suppressed():
+    policy = RecallPolicy()
+
+    assert policy.is_auto_query_too_vague("这张图片的上下文我想起来了")
+    assert policy.is_auto_query_too_vague("最近发生了什么")
+    assert policy.is_auto_query_too_vague("今天怎么样")
+    assert not policy.is_auto_query_too_vague("最近少女暴君")
+    assert not policy.is_auto_query_too_vague("今天猫咪药量")
+    assert not policy.is_auto_query_too_vague("handoff bridge 注入 读图 原文")
+
+    decision = policy.assess(
+        "这张图片的上下文我想起来了",
+        {"text": "具身AGI接入家居系统的三种不想睡场景"},
+        semantic_score=0.95,
+        auto=True,
+    )
+
+    assert decision.reason == "auto_vague_query_without_topic"
+    assert not decision.admit_direct
+
+
+def test_auto_concrete_topic_query_marks_short_chinese_topics_for_context_filtering():
+    policy = RecallPolicy()
+
+    assert policy.is_auto_concrete_topic_query("少女暴君")
+    assert policy.is_auto_concrete_topic_query("最近少女暴君")
+    assert policy.is_auto_concrete_topic_query("今天猫咪药量")
+    assert not policy.is_auto_concrete_topic_query("这张图片的上下文我想起来了")
+    assert not policy.is_auto_concrete_topic_query("种子项目现在怎样")
+    assert not policy.is_auto_concrete_topic_query("小雨")
+
+
 def test_topic_evidence_terms_are_filtered_once_in_policy():
     policy = RecallPolicy()
 

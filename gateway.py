@@ -32,7 +32,7 @@ from memory_diffusion import (
     should_suppress_context_candidate,
 )
 from memory_edges import MemoryEdgeStore
-from memory_moments import MemoryMomentStore
+from memory_moments import MemoryMomentStore, parse_bucket_moments
 from memory_relevance import (
     active_facets,
     facets_for_node,
@@ -556,6 +556,7 @@ class GatewayService:
         recalled_moments: list[dict] = []
         moment_candidates: list[dict] = []
         suppressed_moments: list[dict] = []
+        suppressed_buckets: list[dict] = []
         all_moments: list[dict] = []
         grouped_moments: dict[str, list[dict]] = {}
         moment_edges: list[dict] = []
@@ -582,7 +583,12 @@ class GatewayService:
             recent_context = await self._build_recent_context_block(all_buckets, current_user_query)
             if self.recalled_budget > 0 or self.related_memory_budget > 0:
                 all_moments, grouped_moments, moment_edges = self._refresh_moment_graph(all_buckets)
-                recalled_moments, moment_candidates, suppressed_moments = await self._select_dynamic_moments(
+                (
+                    recalled_moments,
+                    moment_candidates,
+                    suppressed_moments,
+                    suppressed_buckets,
+                ) = await self._select_dynamic_moments(
                     current_user_query,
                     session_id,
                     all_buckets,
@@ -590,6 +596,7 @@ class GatewayService:
                 )
             else:
                 suppressed_moments = []
+                suppressed_buckets = []
             recalled_memory = self._format_recalled_moments(
                 recalled_moments,
                 grouped_moments,
@@ -660,6 +667,7 @@ class GatewayService:
                 favorite_ids=favorite_ids,
                 context_mode=context_mode,
                 suppressed_moments=suppressed_moments,
+                suppressed_buckets=suppressed_buckets,
             )
         return forward_payload, injected_ids
 
@@ -2073,9 +2081,11 @@ class GatewayService:
         return await self._summarize_buckets(core_buckets, self.core_budget)
 
     async def _build_recent_context_block(self, all_buckets: list[dict], query_text: str = "") -> str:
+        if self._auto_query_too_vague(query_text):
+            return ""
         cutoff = datetime.now() - timedelta(hours=self.head_recent_hours)
         enforce_topic = (
-            self._query_requires_topic_evidence(query_text)
+            self._recent_context_requires_topic_evidence(query_text)
             and not self._query_wants_body_chain(query_text)
         )
         recent_buckets = []
@@ -2311,9 +2321,11 @@ class GatewayService:
         session_id: str,
         all_buckets: list[dict],
         grouped_moments: dict[str, list[dict]],
-    ) -> tuple[list[dict], list[dict], list[dict]]:
+    ) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
         if not query or self.inject_max_cards <= 0:
-            return [], [], []
+            return [], [], [], []
+        if self._auto_query_too_vague(query):
+            return [], [], [], []
 
         relevance_query = self._query_has_relevance_facet(query)
         eligible_ids = {
@@ -2329,10 +2341,10 @@ class GatewayService:
             )
         }
         if not eligible_ids:
-            return [], [], []
+            return [], [], [], []
 
         search_query = recall_search_query(query, self.relevance_options)
-        selected_buckets = await self._select_dynamic_buckets(
+        selected_buckets, suppressed_buckets = await self._select_dynamic_buckets(
             query,
             session_id,
             all_buckets,
@@ -2380,7 +2392,7 @@ class GatewayService:
                 seen_buckets.add(bucket_id)
 
         if selected:
-            return selected[: self.inject_max_cards], candidates, suppressed_candidates
+            return selected[: self.inject_max_cards], candidates, suppressed_candidates, suppressed_buckets
 
         recent_ids = self.state_store.get_recent_bucket_ids(session_id, self.skip_recent_rounds)
         active_candidates = [
@@ -2397,7 +2409,7 @@ class GatewayService:
             seen_buckets.add(bucket_id)
             if len(selected) >= self.inject_max_cards:
                 break
-        return selected, candidates, suppressed_candidates
+        return selected, candidates, suppressed_candidates, suppressed_buckets
 
     async def _rerank_moment_candidates(self, query: str, candidates: list[dict]) -> list[dict]:
         if not candidates or not getattr(self.reranker_engine, "enabled", False):
@@ -2723,6 +2735,12 @@ class GatewayService:
     def _query_requires_topic_evidence(self, query: str) -> bool:
         return self.recall_policy.requires_topic_evidence(query)
 
+    def _auto_query_too_vague(self, query: str) -> bool:
+        return self.recall_policy.is_auto_query_too_vague(query)
+
+    def _recent_context_requires_topic_evidence(self, query: str) -> bool:
+        return self.recall_policy.is_auto_concrete_topic_query(query)
+
     def _moment_has_query_topic_evidence(self, query: str, moment: dict) -> bool:
         return self.recall_policy.moment_has_topic_evidence(query, moment)
 
@@ -2817,10 +2835,63 @@ class GatewayService:
             path=path,
             moment_map=moment_map or {},
         )
+        context = self._diffused_temperature_context(
+            moment,
+            path=path,
+            moment_map=moment_map or {},
+        )
+        context_part = f"; context: {context}" if context else ""
         suffix = f" ({note})" if note else ""
         return (
             f"- [bucket_id:{moment.get('bucket_id') or ''}] [moment_id:{moment.get('moment_id') or ''}] "
-            f"{summary}{suffix}"
+            f"{summary}{context_part}{suffix}"
+        )
+
+    def _diffused_temperature_context(
+        self,
+        moment: dict,
+        *,
+        path: Any | None = None,
+        moment_map: dict[str, dict] | None = None,
+        max_items: int = 2,
+        max_chars: int = 90,
+    ) -> str:
+        moment_map = moment_map or {}
+        bucket_id = str(moment.get("bucket_id") or "")
+        if not bucket_id:
+            return ""
+        contexts: list[dict] = []
+        seen: set[str] = set()
+
+        def add_context(candidate: dict | None) -> None:
+            if len(contexts) >= max_items or not isinstance(candidate, dict):
+                return
+            if str(candidate.get("bucket_id") or "") != bucket_id:
+                return
+            if candidate.get("section") not in MOMENT_TEMPERATURE_SECTIONS:
+                return
+            moment_id = str(candidate.get("moment_id") or "")
+            if not moment_id or moment_id == str(moment.get("moment_id") or "") or moment_id in seen:
+                return
+            if not self._moment_text(candidate, max_chars):
+                return
+            seen.add(moment_id)
+            contexts.append(candidate)
+
+        for node_id in getattr(path, "nodes", ()) or ():
+            add_context(moment_map.get(str(node_id)))
+        for candidate in sorted(
+            moment_map.values(),
+            key=lambda item: int(item.get("ordinal") or 0) if isinstance(item, dict) else 0,
+        ):
+            add_context(candidate)
+            if len(contexts) >= max_items:
+                break
+
+        return " / ".join(
+            f"[{MOMENT_SECTION_LABELS.get(str(item.get('section') or ''), str(item.get('section') or 'moment'))}] "
+            f"{self._moment_text(item, max_chars)}"
+            for item in contexts
         )
 
     def _diffused_moment_summary(
@@ -3023,12 +3094,14 @@ class GatewayService:
                 continue
             raw_summary = await self._summarize_bucket(target)
             summary = self._compact_diffused_summary(target, raw_summary)
+            context = self._bucket_temperature_context(target)
             caution = (
                 "conflict_or_blocking_path"
                 if path_has_caution(hit.best_path)
                 else "background_association_not_current_fact"
             )
-            line = f"- [bucket_id:{target_id}] {summary} ({caution})"
+            context_part = f"; context: {context}" if context else ""
+            line = f"- [bucket_id:{target_id}] {summary}{context_part} ({caution})"
             tokens = count_tokens_approx(line)
             if tokens > remaining and parts:
                 break
@@ -3040,6 +3113,27 @@ class GatewayService:
             if remaining <= 0:
                 break
         return "\n".join(parts)
+
+    def _bucket_temperature_context(
+        self,
+        bucket: dict,
+        max_items: int = 2,
+        max_chars: int = 90,
+    ) -> str:
+        try:
+            moments = parse_bucket_moments(bucket, self.relevance_options)
+        except Exception:
+            return ""
+        contexts = [
+            moment
+            for moment in moments
+            if moment.get("section") in MOMENT_TEMPERATURE_SECTIONS and self._moment_text(moment, max_chars)
+        ][:max_items]
+        return " / ".join(
+            f"[{MOMENT_SECTION_LABELS.get(str(moment.get('section') or ''), str(moment.get('section') or 'moment'))}] "
+            f"{self._moment_text(moment, max_chars)}"
+            for moment in contexts
+        )
 
     def _node_facets_enabled(self) -> bool:
         cfg = self.config.get("node_facets", {}) or {}
@@ -3087,9 +3181,11 @@ class GatewayService:
         all_buckets: list[dict],
         *,
         search_query: str = "",
-    ) -> list[dict]:
+    ) -> tuple[list[dict], list[dict]]:
         if not query or self.inject_max_cards <= 0:
-            return []
+            return [], []
+        if self._auto_query_too_vague(query):
+            return [], []
 
         relevance_query = self._query_has_relevance_facet(query)
         eligible = [
@@ -3101,7 +3197,7 @@ class GatewayService:
             or (relevance_query and self._is_relevance_candidate_bucket(query, bucket))
         ]
         if not eligible:
-            return []
+            return [], []
 
         bucket_map = {bucket["id"]: bucket for bucket in eligible}
         candidate_query = search_query or query
@@ -3109,7 +3205,7 @@ class GatewayService:
         semantic_scores = await self._get_semantic_candidates(candidate_query, set(bucket_map))
         candidate_ids = set(keyword_scores) | set(semantic_scores)
         if not candidate_ids:
-            return []
+            return [], []
 
         now = datetime.now()
         recent_ids = self.state_store.get_recent_bucket_ids(session_id, self.skip_recent_rounds)
@@ -3168,14 +3264,18 @@ class GatewayService:
         scored_candidates = await self._rerank_scored_bucket_candidates(query, scored_candidates)
         filtered = [item for item in scored_candidates if item["bucket"]["id"] not in recent_ids]
         active_pool = filtered or scored_candidates
-        active_pool = [
-            item for item in active_pool
-            if self._admit_bucket_for_recall(query, item)
-        ]
+        admitted_pool = []
+        suppressed_candidates = []
+        for item in active_pool:
+            if self._admit_bucket_for_recall(query, item):
+                admitted_pool.append(item)
+            else:
+                suppressed_candidates.append(item)
+        active_pool = admitted_pool
         if not active_pool:
-            return []
+            return [], suppressed_candidates
         selected = self._pick_dynamic_cards(active_pool)
-        return [item["bucket"] for item in selected]
+        return [item["bucket"] for item in selected], suppressed_candidates
 
     async def _rerank_scored_bucket_candidates(self, query: str, scored_candidates: list[dict]) -> list[dict]:
         if not scored_candidates or not getattr(self.reranker_engine, "enabled", False):
@@ -3246,6 +3346,7 @@ class GatewayService:
             has_topic_evidence=self._bucket_has_query_topic_evidence(query, bucket),
             semantic_score=item.get("semantic_score"),
             rerank_score=item.get("rerank_score"),
+            auto=True,
         )
         item["admission_reason"] = decision.reason
         item["recall_policy_debug"] = decision.debug
@@ -3268,6 +3369,7 @@ class GatewayService:
             has_topic_evidence=self._moment_has_query_topic_evidence(query, moment),
             rerank_score=moment.get("rerank_score"),
             context_only=moment.get("section") in MOMENT_TEMPERATURE_SECTIONS,
+            auto=True,
         )
         moment["admission_reason"] = decision.reason
         moment["recall_policy_debug"] = decision.debug
@@ -3362,6 +3464,8 @@ class GatewayService:
         extracted = self._summary_from_jsonish_text(raw)
         if extracted:
             return self._clip_text(extracted, max_chars)
+        if raw:
+            return self._clip_text(raw, max_chars)
 
         meta = bucket.get("metadata", {}) or {}
         title = str(meta.get("name") or bucket.get("id") or "memory").strip()
@@ -3482,6 +3586,28 @@ class GatewayService:
         remaining = max(0, self.inject_total_budget - stable_tokens)
         return stable_context, self._trim_text(dynamic_context, remaining)
 
+    def _format_suppressed_bucket_debug(self, item: dict) -> dict[str, Any]:
+        bucket = item.get("bucket") if isinstance(item, dict) else {}
+        if not isinstance(bucket, dict):
+            bucket = {}
+        metadata = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        debug = item.get("recall_policy_debug")
+        return {
+            "bucket_id": str(bucket.get("id") or ""),
+            "bucket_name": str(metadata.get("name") or bucket.get("id") or ""),
+            "admission_reason": str(item.get("admission_reason") or "suppressed"),
+            "score": self._safe_float(item.get("score"), 0.0),
+            "semantic_score": self._safe_float(item.get("semantic_score"), 0.0),
+            "keyword_score": self._safe_float(item.get("keyword_score"), 0.0),
+            "rerank_score": (
+                self._safe_float(item.get("rerank_score"), 0.0)
+                if item.get("rerank_score") is not None
+                else None
+            ),
+            "recall_policy_debug": debug if isinstance(debug, dict) else {},
+            "content_preview": self._clip_text(strip_wikilinks(str(bucket.get("content") or "")), 180),
+        }
+
     def _build_injection_debug_payload(
         self,
         *,
@@ -3495,6 +3621,7 @@ class GatewayService:
         favorite_ids: list[str],
         context_mode: str = "",
         suppressed_moments: list[dict] | None = None,
+        suppressed_buckets: list[dict] | None = None,
     ) -> dict[str, Any]:
         recalled_moment_ids = [
             str(moment.get("moment_id") or "")
@@ -3518,6 +3645,10 @@ class GatewayService:
             "diffused_bucket_ids": diffused_bucket_ids,
             "recalled_moment_ids": recalled_moment_ids,
             "diffused_moment_ids": self._extract_moment_ids_from_context(related_memory),
+            "suppressed_bucket_candidates": [
+                self._format_suppressed_bucket_debug(item)
+                for item in (suppressed_buckets or [])[:20]
+            ],
             "suppressed_candidates": [
                 {
                     "bucket_id": str(moment.get("bucket_id") or ""),

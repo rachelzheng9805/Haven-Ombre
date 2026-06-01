@@ -792,6 +792,61 @@ async def test_enrich_backfill_helper_enriches_unenriched_dynamic_buckets(monkey
 
 
 @pytest.mark.asyncio
+async def test_edge_backfill_helper_processes_enriched_buckets_without_metadata_gate(monkeypatch, bucket_mgr):
+    import server
+
+    enriched = await bucket_mgr.create(
+        content="这条旧记忆已有 confidence，但还需要补新的关系边。",
+        name="已 enrich 旧记忆",
+        domain=["记忆"],
+        confidence=0.72,
+    )
+    await bucket_mgr.create(
+        content="feel 不参与关系边补跑。",
+        name="日印象",
+        tags=["relationship_weather"],
+        bucket_type="feel",
+    )
+    calls = []
+    edge_store = object()
+
+    class FakeReflectionEngine:
+        async def backfill_edges_for_bucket(
+            self,
+            bucket_id,
+            bucket_mgr_arg,
+            edge_store_arg,
+            embedding_engine=None,
+            dry_run=False,
+        ):
+            assert bucket_mgr_arg is bucket_mgr
+            assert edge_store_arg is edge_store
+            assert embedding_engine is server.embedding_engine
+            assert dry_run is True
+            calls.append(bucket_id)
+            return {
+                "status": "ok",
+                "id": bucket_id,
+                "edges": 0,
+                "proposed_edges": 1,
+                "dry_run": True,
+            }
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "memory_edge_store", edge_store)
+    monkeypatch.setattr(server, "reflection_engine", FakeReflectionEngine())
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    result = await server._backfill_memory_edges(limit=10, dry_run=True)
+
+    assert calls == [enriched]
+    assert result["processed"] == 1
+    assert result["ids"] == [enriched]
+    assert result["proposed_edges"] == 1
+    assert result["edges"] == 0
+
+
+@pytest.mark.asyncio
 async def test_comment_bucket_adds_ring_and_touches_source(monkeypatch, bucket_mgr, decay_eng):
     import server
 

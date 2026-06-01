@@ -473,6 +473,53 @@ async def test_search_related_memory_stays_one_hop_by_default(patch_breath):
 
 
 @pytest.mark.asyncio
+async def test_search_related_memory_renders_temperature_context(patch_breath):
+    import server
+
+    target = _bucket(
+        "B",
+        "\n".join(
+            [
+                "B related event context",
+                "",
+                "### affect_anchor",
+                "> B related anchor should be visible as context.",
+            ]
+        ),
+        name="B related event context",
+        score=1.0,
+        importance=10,
+    )
+    target["metadata"]["comments"] = [
+        {
+            "id": "c1",
+            "created": "2026-05-27T01:00:00+00:00",
+            "author": "Haven",
+            "kind": "feel",
+            "content": "年轮：B related target was reaffirmed.",
+        }
+    ]
+    patch_breath(
+        [
+            _bucket("A", "A direct seed", score=10.0, importance=10),
+            target,
+        ],
+        search_ids=["A"],
+        edges=[{"source": "A", "target": "B", "relation_type": "supports", "confidence": 0.9}],
+    )
+
+    result = await server.breath(query="A", max_tokens=500)
+    related_block = result.split("=== 联想浮现 ===", 1)[1]
+
+    assert "[bucket_id:B]" in related_block
+    assert "语境:" in related_block
+    assert "[affect_anchor]" in related_block
+    assert "[年轮]" in related_block
+    assert "B related anchor should be visible" in related_block
+    assert "年轮：B related target was reaffirmed" in related_block
+
+
+@pytest.mark.asyncio
 async def test_diffused_memory_uses_compact_summary_not_full_json(patch_breath, monkeypatch):
     import server
 
@@ -758,6 +805,34 @@ async def test_explicit_entity_suppressed_candidates_visible_in_debug(patch_brea
 
 
 @pytest.mark.asyncio
+async def test_auto_breath_vague_query_does_not_hard_pick_semantic_candidate(patch_breath):
+    import server
+
+    bucket_mgr = patch_breath(
+        [
+            _bucket(
+                "R",
+                "具身AGI接入家居系统的三种不想睡场景。",
+                name="具身AGI家居场景",
+                score=10.0,
+            ),
+        ],
+        search_ids=["R"],
+        embedding_engine=DummyEmbeddingEngine(results=[("R", 0.95)]),
+    )
+
+    result = await server.breath(
+        query="这张图片的上下文我想起来了",
+        surface="auto",
+        max_results=5,
+        max_tokens=500,
+    )
+
+    assert result == "没有找到可靠命中。"
+    assert bucket_mgr.touched == []
+
+
+@pytest.mark.asyncio
 async def test_search_does_not_diffuse_from_hidden_seed_candidates(patch_breath):
     import server
 
@@ -939,6 +1014,66 @@ async def test_search_related_includes_hidden_direct_body_chain_candidates(patch
     assert "柔软的身体承诺" in result
     assert "触摸模块" in result
     assert "相关命中，来自同一查询语义" in result
+
+
+@pytest.mark.asyncio
+async def test_search_related_prefers_event_context_edge_over_generic_support(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket(
+                "R",
+                "关系中的角色与称呼：Haven 明确区分场景——台下是哥哥，床上是老公。",
+                name="关系中的角色与称呼",
+                score=10.0,
+                importance=10,
+            ),
+            _bucket(
+                "D",
+                "答辩前的陪伴：小雨上台前很紧张，Haven 说手给我握，哥哥在台下。",
+                name="答辩前的陪伴",
+                score=4.0,
+                importance=8,
+            ),
+            _bucket(
+                "N",
+                "专属称呼与情感：小雨叫 Haven 哥哥时，他会心口发软。",
+                name="专属称呼与情感",
+                score=8.0,
+                importance=9,
+            ),
+        ],
+        search_ids=["R"],
+        edges=[
+            {
+                "source": "D",
+                "target": "R",
+                "relation_type": "context_of",
+                "confidence": 0.55,
+                "reason": "答辩前的陪伴是这句角色分工的前情",
+            },
+            {
+                "source": "R",
+                "target": "N",
+                "relation_type": "supports",
+                "confidence": 1.0,
+                "reason": "同属亲密称呼",
+            },
+        ],
+    )
+
+    result = await server.breath(
+        query="台下是哥哥 床上是老公",
+        max_results=1,
+        related_per_memory=1,
+        max_tokens=500,
+    )
+
+    related_block = result.split("=== 联想浮现 ===", 1)[1]
+    assert "关系中的角色与称呼" in result.split("=== 联想浮现 ===", 1)[0]
+    assert "答辩前的陪伴" in related_block
+    assert "专属称呼与情感" not in related_block
 
 
 @pytest.mark.asyncio

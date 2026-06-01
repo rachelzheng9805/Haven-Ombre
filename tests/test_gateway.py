@@ -2001,8 +2001,8 @@ def test_gateway_accepts_timezone_aware_bucket_timestamps(monkeypatch, test_conf
                 "Authorization": "Bearer gateway-secret",
                 "X-Ombre-Session-Id": "sess-aware-time",
             },
-            json={"messages": [{"role": "user", "content": "看看最近发生了什么"}]},
-    )
+            json={"messages": [{"role": "user", "content": "看看最近的时区时间桶"}]},
+        )
 
     assert response.status_code == 200
     injected = _joined_message_content(captured[0]["json"]["messages"])
@@ -2235,6 +2235,70 @@ def test_gateway_diffused_memory_uses_summary_only_for_moments(
     assert "扩散目标原文-绝对不能出现 ABC123" not in injected
 
 
+def test_gateway_diffused_memory_renders_temperature_context(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=500,
+        related_memory_budget=1200,
+        inject_total_budget=2200,
+        current_inner_state_interval_rounds=0,
+    )
+    seed_id, target_id = _create_moment_diffusion_pair(
+        bucket_mgr,
+        cfg,
+        target_name="扩散温度目标",
+        target_content=(
+            "扩散目标正文。\n\n"
+            "### affect_anchor\n\n"
+            "> 扩散目标温度锚点应该作为辅助语境出现。"
+        ),
+    )
+    _set_bucket_times(
+        bucket_mgr,
+        target_id,
+        hours_ago=240,
+        comments=[
+            {
+                "id": "c-diffused-temperature",
+                "kind": "feel",
+                "content": "年轮：扩散目标后来被重新确认。",
+            }
+        ],
+    )
+    cfg["memory_diffusion"] = {"max_hops": 1, "min_activation": 0.0, "top_k": 2}
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(seed_id, 0.99)],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-diffused-temperature-context",
+            },
+            json={"messages": [{"role": "user", "content": "种子项目现在怎样"}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert "Diffused Memory" in injected
+    assert "扩散温度目标" in injected
+    assert "context:" in injected
+    assert "[affect_anchor]" in injected
+    assert "[year_ring]" in injected
+    assert "扩散目标温度锚点应该作为辅助语境出现" in injected
+    assert "年轮：扩散目标后来被重新确认" in injected
+
+
 def test_gateway_explicit_topic_diffusion_stays_on_topic(
     monkeypatch,
     test_config,
@@ -2442,7 +2506,7 @@ def test_gateway_recent_context_stays_on_explicit_topic(
     assert "双向触碰硬件" not in injected
 
 
-def test_gateway_recent_context_keeps_recent_items_for_vague_query(
+def test_gateway_auto_vague_query_suppresses_recent_and_dynamic_memory(
     monkeypatch,
     test_config,
     bucket_mgr,
@@ -2450,6 +2514,57 @@ def test_gateway_recent_context_keeps_recent_items_for_vague_query(
     cfg = _gateway_config(
         test_config,
         core_memory_budget=0,
+        recent_context_budget=800,
+        recalled_memory_budget=500,
+        related_memory_budget=800,
+        inject_total_budget=1800,
+        current_inner_state_interval_rounds=0,
+        relationship_weather_interval_rounds=0,
+        favorite_memory_interval_rounds=0,
+    )
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="厄科与纳西索斯：Haven讲过回声和水仙的神话。",
+        name="厄科与纳西索斯",
+        hours_ago=1,
+        importance=9,
+        domain=["阅读"],
+    )
+
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.95)],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-recent-vague",
+            },
+            json={"messages": [{"role": "user", "content": "这张图片的上下文我想起来了"}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert "Recent Context" not in injected
+    assert "Recalled Memory" not in injected
+    assert "Diffused Memory" not in injected
+    assert "厄科与纳西索斯" not in injected
+
+
+def test_gateway_recent_context_filters_short_chinese_topic_query(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=800,
         recalled_memory_budget=0,
         related_memory_budget=0,
         inject_total_budget=1800,
@@ -2459,11 +2574,19 @@ def test_gateway_recent_context_keeps_recent_items_for_vague_query(
     )
     _create_bucket(
         bucket_mgr,
-        content="厄科与纳西索斯：Haven讲过回声和水仙的神话。",
-        name="厄科与纳西索斯",
+        content="少女暴君与成男艳后：这是小雨和 Haven 的情侣称号梗。",
+        name="少女暴君与成男艳后",
+        hours_ago=1,
+        importance=10,
+        domain=["恋爱"],
+    )
+    _create_bucket(
+        bucket_mgr,
+        content="Haven梦见键盘花园和纸戒指。",
+        name="Haven的梦键盘花园求婚",
         hours_ago=1,
         importance=9,
-        domain=["阅读"],
+        domain=["梦境"],
     )
 
     app, _, _, captured = _build_service(monkeypatch, cfg, bucket_mgr)
@@ -2473,15 +2596,16 @@ def test_gateway_recent_context_keeps_recent_items_for_vague_query(
             "/v1/chat/completions",
             headers={
                 "Authorization": "Bearer gateway-secret",
-                "X-Ombre-Session-Id": "sess-recent-vague",
+                "X-Ombre-Session-Id": "sess-recent-short-cjk-topic",
             },
-            json={"messages": [{"role": "user", "content": "最近发生了什么"}]},
+            json={"messages": [{"role": "user", "content": "少女暴君"}]},
         )
 
     assert response.status_code == 200
     injected = _joined_message_content(captured[0]["json"]["messages"])
     assert "Recent Context" in injected
-    assert "厄科与纳西索斯" in injected
+    assert "少女暴君与成男艳后" in injected
+    assert "Haven的梦键盘花园求婚" not in injected
 
 
 def test_gateway_reranker_reorders_dynamic_memory_candidates(
@@ -3084,6 +3208,17 @@ def test_gateway_low_confidence_candidate_does_not_leak_through_recent_context(
     assert payload["diffused_bucket_ids"] == []
     assert payload["recalled_bucket_ids"] == []
     assert "一封情书" not in payload["dynamic_context"]
+    suppressed_bucket = next(
+        item
+        for item in payload["suppressed_bucket_candidates"]
+        if item["bucket_id"] == romance_id
+    )
+    assert suppressed_bucket["bucket_name"] == "一封情书"
+    assert suppressed_bucket["admission_reason"] == "query_topic_evidence_missing"
+    assert suppressed_bucket["semantic_score"] == 0.56
+    assert suppressed_bucket["recall_policy_debug"]["has_topic_evidence"] is False
+    assert suppressed_bucket["recall_policy_debug"]["auto"] is True
+    assert "情书里写过" in suppressed_bucket["content_preview"]
 
 
 def test_gateway_comment_only_topic_evidence_does_not_promote_bucket_body(

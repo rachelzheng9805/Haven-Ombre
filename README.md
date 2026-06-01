@@ -641,6 +641,7 @@ rm /srv/ombre-brain/state/.dashboard_auth.json
 | `introspection` | 原 `dream()` 自省入口的新名字，不替代日记，也不是梦境生成；原 `dream()` 入口仍可用 |
 | `resurface` | 只读浮现久未触碰的旧记忆 |
 | `reflect` | 生成 daily relationship_weather feel |
+| `edge_backfill` | 只补旧 bucket 的 memory_edges 关系边；不改正文、tags、importance、confidence |
 | `inspect_diffusion` | 只读诊断 query 如何沿 memory_edges 扩散 |
 | `inspect_moments` | 只读诊断 bucket 如何被拆成 moment，并刷新 `memory_moments.sqlite` |
 
@@ -1074,6 +1075,7 @@ python scripts/cleanup_orphan_embeddings.py --delete --yes
 
 # enrich 补跑
 # 正常情况下 reflection scheduler 会自动少量补跑；需要手动修复时可从 MCP 客户端调用 enrich_backfill(limit=20)。
+# 只补关系边、不改 bucket metadata/正文时，用 edge_backfill(limit=10, bucket_id="", query="", dry_run=false)。
 
 # 旧 feel -> 年轮迁移，建议优先走 one_click.sh 的“从原版 Ombre-Brain 迁移”
 docker compose -f compose.hk.yml exec -T ombre-brain sh -lc 'PYTHONIOENCODING=utf-8 python scripts/plan_feel_comment_backfill.py --mapping-template /state/feel_comment_backfill_mapping.json --review-markdown /state/feel_comment_backfill_review.md > /state/feel_comment_backfill_plan.json'

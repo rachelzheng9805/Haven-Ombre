@@ -79,7 +79,7 @@ from memory_diffusion import (
     should_suppress_context_candidate,
 )
 from memory_edges import MemoryEdgeStore
-from memory_moments import MemoryMomentStore
+from memory_moments import MemoryMomentStore, parse_bucket_moments
 from memory_relevance import (
     active_facets,
     facets_for_text,
@@ -1281,6 +1281,11 @@ def _bucket_needs_memory_enrichment(bucket: dict) -> bool:
     return confidence <= 0.0
 
 
+def _bucket_allows_memory_edge_backfill(bucket: dict) -> bool:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    return bool(bucket and meta.get("type") != "feel" and not meta.get("protected"))
+
+
 async def _backfill_memory_enrichment(
     limit: int | None = None,
     *,
@@ -1336,6 +1341,138 @@ async def _backfill_memory_enrichment(
 async def enrich_backfill(limit: int = 10) -> dict:
     """后台补跑缺失的 tags/confidence/memory_edges；主要用于 enrich_on_write 曾经超时或关闭后的修复。"""
     return await _backfill_memory_enrichment(limit=limit)
+
+
+async def _search_edge_backfill_buckets(mgr, query: str, limit: int) -> list[dict]:
+    try:
+        return await mgr.search(query, limit=max(limit, 20), include_archive=False)
+    except TypeError:
+        return await mgr.search(query, limit=max(limit, 20))
+
+
+async def _edge_backfill_candidates(
+    mgr,
+    *,
+    limit: int,
+    bucket_id: str = "",
+    query: str = "",
+) -> tuple[list[dict], list[str]]:
+    warnings: list[str] = []
+    bucket_id = str(bucket_id or "").strip()
+    query = str(query or "").strip()
+    if bucket_id:
+        bucket = await mgr.get(bucket_id)
+        if not bucket:
+            return [], [f"missing_bucket: {bucket_id}"]
+        return ([bucket] if _bucket_allows_memory_edge_backfill(bucket) else []), []
+
+    if query:
+        try:
+            buckets = await _search_edge_backfill_buckets(mgr, query, limit)
+        except Exception as e:
+            return [], [f"search_failed: {e}"]
+    else:
+        try:
+            buckets = await mgr.list_all(include_archive=False)
+        except Exception as e:
+            return [], [f"list_failed: {e}"]
+        buckets.sort(
+            key=lambda item: item.get("metadata", {}).get("updated_at") or item.get("metadata", {}).get("created", ""),
+            reverse=True,
+        )
+
+    selected = []
+    seen = set()
+    for bucket in buckets:
+        current_id = str(bucket.get("id") or "")
+        if not current_id or current_id in seen:
+            continue
+        if not _bucket_allows_memory_edge_backfill(bucket):
+            continue
+        selected.append(bucket)
+        seen.add(current_id)
+        if len(selected) >= limit:
+            break
+    return selected, warnings
+
+
+async def _backfill_memory_edges(
+    limit: int | None = None,
+    *,
+    bucket_id: str = "",
+    query: str = "",
+    dry_run: bool = False,
+    bucket_mgr_arg=None,
+    reflection_engine_arg=None,
+    edge_store_arg=None,
+    embedding_engine_arg=None,
+) -> dict:
+    mgr = bucket_mgr_arg or bucket_mgr
+    engine = reflection_engine_arg or reflection_engine
+    edge_store = edge_store_arg or memory_edge_store
+    emb_engine = embedding_engine_arg or embedding_engine
+    reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
+    default_limit = _int_between(reflection_cfg.get("edge_backfill_limit"), 5, 0, 50)
+    limit = 1 if str(bucket_id or "").strip() else _int_between(limit, default_limit, 0, 50)
+    if limit <= 0:
+        return {"processed": 0, "ids": [], "edges": 0, "proposed_edges": 0, "errors": [], "dry_run": bool(dry_run)}
+
+    candidates, warnings = await _edge_backfill_candidates(
+        mgr,
+        limit=limit,
+        bucket_id=bucket_id,
+        query=query,
+    )
+    processed: list[str] = []
+    results: list[dict] = []
+    errors: list[str] = list(warnings)
+    edge_count = 0
+    proposed_count = 0
+    for bucket in candidates:
+        current_id = bucket.get("id")
+        if not current_id:
+            continue
+        try:
+            result = await engine.backfill_edges_for_bucket(
+                current_id,
+                mgr,
+                edge_store,
+                embedding_engine=emb_engine,
+                dry_run=dry_run,
+            )
+            result = dict(result or {})
+            processed.append(current_id)
+            edge_count += int(result.get("edges", 0) or 0)
+            proposed_count += int(result.get("proposed_edges", 0) or 0)
+            results.append(result)
+        except Exception as e:
+            logger.warning("Memory edge backfill failed / 关系边补跑失败: %s: %s", current_id, e)
+            errors.append(f"{current_id}: {e}")
+    return {
+        "processed": len(processed),
+        "ids": processed,
+        "edges": edge_count,
+        "proposed_edges": proposed_count,
+        "results": results,
+        "errors": errors,
+        "dry_run": bool(dry_run),
+    }
+
+
+@mcp.tool()
+async def edge_backfill(
+    limit: int = 10,
+    bucket_id: str = "",
+    query: str = "",
+    dry_run: bool = False,
+) -> dict:
+    """只补 memory_edges 关系边，不改 bucket 正文、tags、importance、confidence。可用 bucket_id 或 query 定向。"""
+    return await _backfill_memory_edges(
+        limit=limit,
+        bucket_id=bucket_id,
+        query=query,
+        dry_run=dry_run,
+    )
 
 
 async def _ensure_decay_engine_started_for_transport(transport_name: str) -> None:
@@ -1506,6 +1643,7 @@ async def _build_mcp_diffused_memory_block(
                 clean_meta,
             )
             summary = _compact_diffused_summary(target, raw_summary)
+            context = _bucket_temperature_context(target)
             path_summary = _bucket_diffusion_path_summary(hit.best_path, bucket_map)
             caution = (
                 "路径含冲突/阻断，仅作边界背景。"
@@ -1513,7 +1651,8 @@ async def _build_mcp_diffused_memory_block(
                 else "背景联想，不代表当前事实。"
             )
             path_part = f"路径: {path_summary}；" if path_summary else ""
-            block = f"- [bucket_id:{target_id}] {path_part}摘要: {summary}（{caution}）"
+            context_part = f"；语境: {context}" if context else ""
+            block = f"- [bucket_id:{target_id}] {path_part}摘要: {summary}{context_part}（{caution}）"
             block_tokens = count_tokens_approx(block)
             if block_tokens > remaining:
                 break
@@ -1527,6 +1666,19 @@ async def _build_mcp_diffused_memory_block(
             continue
 
     return "\n---\n".join(parts)
+
+
+def _bucket_temperature_context(bucket: dict, max_items: int = 2, max_chars: int = 90) -> str:
+    try:
+        moments = parse_bucket_moments(bucket, _recall_relevance_options())
+    except Exception:
+        return ""
+    contexts = [
+        moment
+        for moment in moments
+        if moment.get("section") in MOMENT_TEMPERATURE_SECTIONS and _moment_text(moment, max_chars)
+    ][:max_items]
+    return " / ".join(f"[{_moment_label(moment)}] {_moment_text(moment, max_chars)}" for moment in contexts)
 
 
 MOMENT_SECTION_LABELS = {
@@ -1744,15 +1896,18 @@ def _format_related_moment(
     moment_map: dict[str, dict] | None = None,
 ) -> str:
     note = "路径含冲突/阻断，仅作边界背景。" if caution else "背景联想，不代表当前事实。"
-    summary = _diffused_moment_summary(moment, path=path, moment_map=moment_map or {})
+    moment_map = moment_map or {}
+    summary = _diffused_moment_summary(moment, path=path, moment_map=moment_map)
+    context = _diffused_temperature_context(moment, path=path, moment_map=moment_map)
     path_part = ""
     if path is not None:
-        path_summary = _moment_path_summary(path, moment_map or {})
+        path_summary = _moment_path_summary(path, moment_map)
         if path_summary:
             path_part = f"路径: {path_summary}；"
+    context_part = f"；语境: {context}" if context else ""
     return (
         f"- [bucket_id:{moment['bucket_id']}] [moment_id:{moment['moment_id']}] "
-        f"{path_part}摘要: {summary}（{note}）"
+        f"{path_part}摘要: {summary}{context_part}（{note}）"
     )
 
 
@@ -1781,6 +1936,50 @@ def _diffused_moment_summary(
     if path_summary:
         parts.append(f"路径 {path_summary}")
     return _clip_text("；".join(parts), max_chars)
+
+
+def _diffused_temperature_context(
+    moment: dict,
+    *,
+    path=None,
+    moment_map: dict[str, dict] | None = None,
+    max_items: int = 2,
+    max_chars: int = 90,
+) -> str:
+    moment_map = moment_map or {}
+    bucket_id = str(moment.get("bucket_id") or "")
+    if not bucket_id:
+        return ""
+    contexts: list[dict] = []
+    seen: set[str] = set()
+
+    def add_context(candidate: dict | None) -> None:
+        if len(contexts) >= max_items or not isinstance(candidate, dict):
+            return
+        if str(candidate.get("bucket_id") or "") != bucket_id:
+            return
+        if candidate.get("section") not in MOMENT_TEMPERATURE_SECTIONS:
+            return
+        moment_id = str(candidate.get("moment_id") or "")
+        if not moment_id or moment_id == str(moment.get("moment_id") or "") or moment_id in seen:
+            return
+        text = _moment_text(candidate, max_chars)
+        if not text:
+            return
+        seen.add(moment_id)
+        contexts.append(candidate)
+
+    for node_id in getattr(path, "nodes", ()) or ():
+        add_context(moment_map.get(str(node_id)))
+    for candidate in sorted(
+        moment_map.values(),
+        key=lambda item: int(item.get("ordinal") or 0) if isinstance(item, dict) else 0,
+    ):
+        add_context(candidate)
+        if len(contexts) >= max_items:
+            break
+
+    return " / ".join(f"[{_moment_label(item)}] {_moment_text(item, max_chars)}" for item in contexts)
 
 
 def _moment_status_label(moment: dict) -> str:
@@ -1863,6 +2062,8 @@ def _breath_moment_admission_decision(
     query: str,
     moment: dict,
     seed_diagnostics: dict[str, dict],
+    *,
+    auto: bool = False,
 ):
     seed = seed_diagnostics.get(str(moment.get("bucket_id") or ""), {})
     return _recall_policy().assess(
@@ -1871,6 +2072,7 @@ def _breath_moment_admission_decision(
         semantic_score=seed.get("embedding_score"),
         rerank_score=moment.get("rerank_score"),
         context_only=moment.get("section") in MOMENT_TEMPERATURE_SECTIONS,
+        auto=auto,
     )
 
 
@@ -2714,12 +2916,14 @@ async def breath(
     core_limit: int = 3,
     is_session_start: bool = False,
     debug: bool = False,
+    surface: str = "manual",
 ) -> str:
     """读取记忆,不写入。
     调用方式: 新对话用 breath(is_session_start=True); 查过去用 breath(query="主题词"); 只读模型感受用 breath(domain="feel"); 只读悄悄话用 breath(domain="whisper")。
     默认只从本次命中的普通记忆沿持久化 memory_edges 带一跳联想浮现; embedding 相似边只是检索/图谱参考,不是可手写的记忆关系。
     如果夜梦与当前语境共振,breath 会追加 ===== 梦境 ===== 块;梦只浮现一次。
     include_core/core_limit 控制 pinned/protected 核心准则数量; include_related=False 可关闭联想浮现块。
+    surface="auto" 用于 Gateway/Bridge 自动注入：空泛召回句不硬捞语义候选。
     """
     await decay_engine.ensure_started()
     max_results = _int_between(max_results, 20, 1, 50)
@@ -2731,6 +2935,8 @@ async def breath(
     core_limit = _int_between(core_limit, 3, 0, 20)
     is_session_start = _bool_value(is_session_start, False)
     debug = _bool_value(debug, False)
+    surface_key = str(surface or "manual").strip().lower()
+    auto_surface = surface_key in {"auto", "automatic", "bridge", "gateway"}
     domain_key = domain.strip().lower()
 
     # --- Feel/whisper retrieval: independent read-only channels ---
@@ -2763,6 +2969,8 @@ async def breath(
     # --- No args or empty query: surfacing mode (weight pool active push) ---
     # --- 无参数或空query：浮现模式（权重池主动推送）---
     if not query or not query.strip():
+        if auto_surface:
+            return "没有找到可靠命中。"
         try:
             all_buckets = await bucket_mgr.list_all(include_archive=False)
         except Exception as e:
@@ -2941,6 +3149,8 @@ async def breath(
     domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
     q_valence = valence if 0 <= valence <= 1 else None
     q_arousal = arousal if 0 <= arousal <= 1 else None
+    if auto_surface and _recall_policy().is_auto_query_too_vague(query):
+        return "没有找到可靠命中。"
     search_query = recall_search_query(query, _recall_relevance_options())
 
     try:
@@ -3017,7 +3227,12 @@ async def breath(
     admitted_moments = []
     suppressed_moments = []
     for moment in moment_candidates:
-        admission = _breath_moment_admission_decision(query, moment, seed_diagnostics)
+        admission = _breath_moment_admission_decision(
+            query,
+            moment,
+            seed_diagnostics,
+            auto=auto_surface,
+        )
         item = dict(moment)
         item["_admission_reason"] = admission.reason
         if admission.admit:
@@ -3115,6 +3330,7 @@ async def breath(
         not related_entry
         and len(returned_moments) < 3
         and not recall_thresholds.get("has_explicit_entity")
+        and not auto_surface
         and max_tokens > token_used
         and random.random() < 0.4
     ):
@@ -3153,7 +3369,7 @@ async def breath(
         except Exception as e:
             logger.warning(f"Resurface failed / 久未触碰浮现失败: {e}")
 
-    dream_block = await dream_engine.surface_for_breath(
+    dream_block = "" if auto_surface else await dream_engine.surface_for_breath(
         query=query,
         valence=valence,
         arousal=arousal,
