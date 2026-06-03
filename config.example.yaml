@@ -438,6 +438,12 @@ reflection:
   candidate_recent_limit: 8
   candidate_semantic_limit: 6
   edge_min_confidence: 0.55
+  identity_role_edges:
+    enabled: false                 # optional, deployment-specific role/title edge hints
+    detail: {}                     # e.g. concrete role combinations or private aliases
+    context: {}                    # e.g. role/title/category memories
+    relationship: {}               # e.g. broader relationship/trust memories
+    shared: {}                     # e.g. terms that count as overlap but do not decide edge direction
   diary_mcp_url: ""               # optional Haven-diary MCP URL, e.g. http://127.0.0.1:8000/mcp
   diary_mcp_token_env: ""         # optional bearer token env var name, e.g. MCP_BEARER_TOKEN
   diary_memory_extract_enabled: true
