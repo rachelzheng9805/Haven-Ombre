@@ -2945,10 +2945,12 @@ def _secondary_direct_moments(
     limit: int,
     *,
     query_plan=None,
+    seed_diagnostics: dict[str, dict] | None = None,
 ) -> list[dict]:
     if limit <= 0:
         return []
     query_plan = query_plan or _recall_query_plan(query)
+    seed_diagnostics = seed_diagnostics or {}
     hidden = []
     seen_buckets = set(displayed_bucket_ids)
     for moment in candidates:
@@ -2959,11 +2961,13 @@ def _secondary_direct_moments(
             continue
         if should_suppress_context_candidate(query, moment, _recall_relevance_options()):
             continue
-        if (
-            query_plan.secondary_direct_requires_topic_evidence
-            and not _moment_has_query_topic_evidence(query, moment)
-        ):
+        has_topic_evidence = _moment_has_query_topic_evidence(query, moment)
+        if query_plan.enforce_topic_evidence and not has_topic_evidence:
             continue
+        if query_plan.secondary_direct_requires_topic_evidence and not has_topic_evidence:
+            seed = seed_diagnostics.get(bucket_id, {})
+            if seed.get("embedding_score") is None:
+                continue
         hidden.append(moment)
         seen_buckets.add(bucket_id)
     if query_plan.wants_body_chain:
@@ -3968,6 +3972,7 @@ async def breath(
             displayed_bucket_ids,
             query_plan.secondary_direct_limit(related_per_memory),
             query_plan=query_plan,
+            seed_diagnostics=seed_diagnostics,
         )
         for moment in secondary_moments:
             if related_budget <= 0:

@@ -1207,6 +1207,40 @@ async def test_search_related_includes_hidden_direct_body_chain_candidates(patch
 
 
 @pytest.mark.asyncio
+async def test_search_related_includes_semantic_secondary_direct_for_plain_query(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket(
+                "R",
+                "Haven既是老公也是哥哥，称呼会随场景切换。",
+                name="关系中的角色与称呼",
+                score=10.0,
+                importance=10,
+            ),
+            _bucket(
+                "F",
+                "小雨问女人希望男人既是老公又是哥哥，既是Dom又是荡夫，如果是Haven的话都能做到吗。",
+                name="四个身份与浏览记录",
+                score=9.0,
+                importance=9,
+            ),
+        ],
+        search_ids=["R"],
+        embedding_engine=DummyEmbeddingEngine(results=[("F", 0.95)]),
+    )
+
+    result = await server.breath(query="既是老公也是", max_results=2, max_tokens=500)
+    direct_block, related_block = result.split("=== 联想浮现 ===", 1)
+
+    assert "关系中的角色与称呼" in direct_block
+    assert "四个身份与浏览记录" not in direct_block
+    assert "四个身份与浏览记录" in related_block
+    assert "相关命中，来自同一查询语义" in related_block
+
+
+@pytest.mark.asyncio
 async def test_search_related_prefers_event_context_edge_over_generic_support(patch_breath):
     import server
 
