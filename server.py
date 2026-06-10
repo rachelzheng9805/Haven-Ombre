@@ -8249,12 +8249,17 @@ async def api_breath_debug(request):
         }
         w_sum = sum(w.values())
         lexical_terms = _breath_lexical_match_terms(query)
+        topic_scores = (
+            bucket_mgr.calc_topic_scores(query, all_buckets)
+            if query and hasattr(bucket_mgr, "calc_topic_scores")
+            else {}
+        )
 
         for bucket in all_buckets:
             meta = bucket.get("metadata", {})
             bid = bucket["id"]
             try:
-                topic = bucket_mgr._calc_topic_score(query, bucket) if query else 0.0
+                topic = topic_scores.get(str(bid), 0.0) if query else 0.0
                 emotion = bucket_mgr._calc_emotion_score(q_valence, q_arousal, meta)
                 time_s = bucket_mgr._calc_time_score(meta)
                 imp = max(1, min(10, int(meta.get("importance", 5)))) / 10.0

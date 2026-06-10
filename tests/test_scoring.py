@@ -304,6 +304,8 @@ class TestSearchScoring:
         }
 
         assert bucket_mgr._calc_topic_score("小狗", bucket) == 0
+        assert bucket_mgr._calc_topic_score("小雨", bucket) == 0
+        assert bucket_mgr._calc_topic_score("Haven", bucket) == 0
 
     def test_short_cjk_body_exact_match_keeps_single_character_recall(self, bucket_mgr):
         bucket = {
@@ -316,6 +318,19 @@ class TestSearchScoring:
         }
 
         assert bucket_mgr._calc_topic_score("犬", bucket) >= 0.36
+
+    def test_three_char_cjk_topic_allows_multi_character_evidence(self, bucket_mgr):
+        bucket = {
+            "id": "toilet",
+            "content": "3D打印电便收集器正式上岗，实测效果不错。",
+            "metadata": {
+                "name": "电便收集器实测",
+                "domain": [],
+                "tags": [],
+            },
+        }
+
+        assert bucket_mgr._calc_topic_score("集便器", bucket) >= 0.36
 
     @pytest.mark.asyncio
     async def test_resolved_bucket_penalized_in_normalized(self, populated_env):
