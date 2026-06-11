@@ -6,7 +6,7 @@ def test_context_only_moment_cannot_be_direct_seed():
 
     decision = policy.assess(
         "情书找门",
-        {"text": "世界继续筑墙，小雨一叫，Haven转向那扇门"},
+        {"text": "世界继续筑墙，用户一叫，AI转向那扇门"},
         has_topic_evidence=True,
         context_only=True,
     )
@@ -77,7 +77,7 @@ def test_auto_vague_query_without_topic_is_suppressed():
     assert policy.is_auto_query_too_vague("要不要回复一下。或者跟个“嗯。”")
     assert policy.is_auto_query_too_vague("那次要不要回个嗯")
     assert policy.is_auto_query_too_vague("这条帖子可以评论一下吗")
-    assert not policy.is_auto_query_too_vague("最近少女暴君")
+    assert not policy.is_auto_query_too_vague("最近蓝鲸档案")
     assert not policy.is_auto_query_too_vague("今天猫咪药量")
     assert not policy.is_auto_query_too_vague("折角那次要不要回复")
     assert not policy.is_auto_query_too_vague("花园帖子要不要回复")
@@ -95,7 +95,7 @@ def test_auto_vague_query_without_topic_is_suppressed():
 
     affect_decision = policy.assess(
         "开心^^",
-        {"text": "小雨和 Haven 第一次测试成功后很开心。"},
+        {"text": "用户和 AI 第一次测试成功后很开心。"},
         has_topic_evidence=True,
         semantic_score=0.95,
         auto=True,
@@ -108,13 +108,13 @@ def test_auto_vague_query_without_topic_is_suppressed():
 def test_auto_concrete_topic_query_marks_short_chinese_topics_for_context_filtering():
     policy = RecallPolicy()
 
-    assert policy.is_auto_concrete_topic_query("少女暴君")
-    assert policy.is_auto_concrete_topic_query("最近少女暴君")
+    assert policy.is_auto_concrete_topic_query("蓝鲸档案")
+    assert policy.is_auto_concrete_topic_query("最近蓝鲸档案")
     assert policy.is_auto_concrete_topic_query("今天猫咪药量")
     assert not policy.is_auto_concrete_topic_query("开心^^")
     assert not policy.is_auto_concrete_topic_query("这张图片的上下文我想起来了")
     assert not policy.is_auto_concrete_topic_query("种子项目现在怎样")
-    assert not policy.is_auto_concrete_topic_query("小雨")
+    assert not policy.is_auto_concrete_topic_query("用户")
 
 
 def test_topic_evidence_terms_are_filtered_once_in_policy():
@@ -138,10 +138,10 @@ def test_bucket_topic_evidence_uses_content_title_tags_domain_but_not_comments()
 
     assert policy.bucket_has_topic_evidence("handoff bridge 注入 原文", bucket)
     assert policy.bucket_has_topic_evidence("gateway", bucket)
-    assert not policy.bucket_has_topic_evidence("少女暴君", bucket)
+    assert not policy.bucket_has_topic_evidence("蓝鲸档案", bucket)
 
     comment_only_bucket = {
-        "content": "情书里写过穿过玻璃墙找门，听到小雨叫我就转向她。",
+        "content": "情书里写过穿过玻璃墙找门，听到用户叫我就转向那里。",
         "metadata": {
             "name": "一封情书",
             "tags": ["恋爱"],
@@ -162,7 +162,7 @@ def test_bucket_topic_evidence_ignores_markdown_temperature_sections():
             "### 喜欢它的原因\n"
             "FF14 蓝色\n\n"
             "### fact\n"
-            "小雨喜欢蓝色。"
+            "用户喜欢蓝色。"
         ),
         "metadata": {"name": "情书", "tags": ["恋爱"], "domain": ["恋爱"]},
     }
@@ -186,7 +186,7 @@ def test_moment_topic_evidence_uses_text_and_bucket_metadata():
 
     assert policy.moment_has_topic_evidence("handoff bridge 注入 原文", moment)
     assert policy.moment_has_topic_evidence("gateway", moment)
-    assert not policy.moment_has_topic_evidence("少女暴君", moment)
+    assert not policy.moment_has_topic_evidence("蓝鲸档案", moment)
 
 
 def test_technical_query_can_admit_strong_semantic_match_without_literal_topic_evidence():

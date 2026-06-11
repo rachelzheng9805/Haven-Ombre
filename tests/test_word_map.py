@@ -10,10 +10,10 @@ def _config(tmp_path: Path, **word_map):
         "state_dir": str(tmp_path / "state"),
         "buckets_dir": str(tmp_path / "buckets"),
         "identity": {
-            "ai_name": "Haven",
-            "user_name": "Rain",
-            "user_display_name": "小雨",
-            "user_aliases": ["宝宝"],
+            "ai_name": "TestAI",
+            "user_name": "User",
+            "user_display_name": "用户",
+            "user_aliases": ["对方"],
         },
         "word_map": {
             "enabled": True,
@@ -45,7 +45,7 @@ def test_word_map_rebuild_creates_nodes_edges_and_bucket_evidence(tmp_path):
         [
             _bucket(
                 "a",
-                "夏天很热，所以小雨开了空调。",
+                "夏天很热，所以用户开了空调。",
                 name="夏天空调",
                 keywords=["夏天", "空调"],
                 domain=["生活"],
@@ -120,8 +120,8 @@ def test_word_map_excludes_structural_tags_and_identity_names(tmp_path):
         [
             _bucket(
                 "a",
-                "Haven 和小雨讨论了咖啡风味。",
-                name="Haven 小雨 咖啡",
+                "TestAI 和用户讨论了咖啡风味。",
+                name="TestAI 用户 咖啡",
                 tags=["relationship_event", "emotional_echo", "profile_fact", "flavor_soft"],
                 keywords=["咖啡风味", "relationship_event"],
                 domain=["memory"],
@@ -130,8 +130,8 @@ def test_word_map_excludes_structural_tags_and_identity_names(tmp_path):
     )
 
     terms = {node["term"] for node in store.list_nodes()}
-    assert "haven" not in terms
-    assert "小雨" not in terms
+    assert "testai" not in terms
+    assert "用户" not in terms
     assert "relationship_event" not in terms
     assert "emotional_echo" not in terms
     assert "profile_fact" not in terms

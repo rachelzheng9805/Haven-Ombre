@@ -21,7 +21,7 @@ def test_identity_query_suppresses_intimacy_candidate():
     decision = relevance_decision(
         "AI relationship",
         {
-            "content": "A private sexual intimacy memory.",
+            "content": "A private intimacy boundary note.",
             "metadata": {"importance": 10},
         },
     )
@@ -45,7 +45,7 @@ def test_non_sensitive_conflict_with_direct_evidence_is_demoted_not_suppressed()
 
 def test_action_query_filters_hardware_protocol_without_direct_action_evidence():
     decision = relevance_decision(
-        "小雨 发邮件",
+        "用户 发邮件",
         {
             "content": "BLE protocol note with notify char and device service UUID.",
             "metadata": {"importance": 10},
@@ -58,9 +58,9 @@ def test_action_query_filters_hardware_protocol_without_direct_action_evidence()
 
 def test_explicit_intimacy_query_allows_intimacy_candidate():
     decision = relevance_decision(
-        "亲密身体",
+        "intimacy",
         {
-            "content": "A private intimacy memory about body closeness.",
+            "content": "An intimacy memory about closeness.",
             "metadata": {"importance": 10},
         },
     )
@@ -107,21 +107,21 @@ def test_annotation_facets_drive_node_relevance_without_alias_text():
 
 def test_context_name_does_not_override_action_intent():
     options = memory_relevance_options_from_config(
-        {"identity": {"ai_name": "Haven", "user_display_name": "小雨"}}
+        {"identity": {"ai_name": "TestAI", "user_display_name": "用户"}}
     )
 
-    assert content_terms_for_query("小雨 发邮件", options) == ["发邮件"]
-    assert recall_search_query("小雨 发邮件", options) == "发邮件"
-    assert recall_search_query("小雨 蓝色", options) == "小雨 蓝色"
+    assert content_terms_for_query("用户 发邮件", options) == ["发邮件"]
+    assert recall_search_query("用户 发邮件", options) == "发邮件"
+    assert recall_search_query("用户 蓝色", options) == "用户 蓝色"
 
     missing_action = relevance_decision(
-        "小雨 发邮件",
-        {"text": "小雨说月亮时进入工作模式。", "metadata": {"importance": 10}},
+        "用户 发邮件",
+        {"text": "用户说月亮时进入工作模式。", "metadata": {"importance": 10}},
         options,
     )
     email_action = relevance_decision(
-        "小雨 发邮件",
-        {"text": "QQ邮箱自动收发配置，可以给小雨发邮件。", "metadata": {"importance": 4}},
+        "用户 发邮件",
+        {"text": "QQ邮箱自动收发配置，可以给用户发邮件。", "metadata": {"importance": 4}},
         options,
     )
 
