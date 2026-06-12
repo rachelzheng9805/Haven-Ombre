@@ -272,9 +272,6 @@ def plan_bucket_migration(bucket: dict[str, Any], *, body_only_moment: str = "sk
     if unheaded_reflections or unheaded_moments:
         converted_moments.extend(unheaded_moments)
         structural_changed = True
-    if maybe_add_body_only_moment(bucket, sections, mode=body_only_mode):
-        structural_changed = True
-
     for anchor_index in anchor_indexes:
         anchor = sections[anchor_index]
         original_anchors.append("\n".join(anchor.render()).strip())
@@ -286,7 +283,7 @@ def plan_bucket_migration(bucket: dict[str, Any], *, body_only_moment: str = "sk
         if kept_text:
             kept_anchor_blocks.append("\n".join(sections[anchor_index].render()).strip())
 
-    if body_only_mode == "wrap" and not moment_candidates and maybe_wrap_unheaded_body_as_moment(sections):
+    if not moment_candidates and maybe_add_body_only_moment(bucket, sections, mode=body_only_mode):
         structural_changed = True
 
     if not moment_candidates and not reflection_candidates and not structural_changed:
@@ -434,11 +431,21 @@ def normalize_unheaded_sections(sections: list[Section]) -> tuple[list[str], lis
 
 def maybe_add_body_only_moment(bucket: dict[str, Any], sections: list[Section], *, mode: str = "skip") -> bool:
     mode = str(mode or "skip").strip().lower()
-    if mode in {"skip", "wrap"}:
+    if mode == "skip":
         return False
-    if any(section.heading_line for section in sections) or len(sections) != 1:
+    if mode == "wrap":
+        mode = "first_sentence"
+    if any(section.canonical == "moment" for section in sections):
         return False
-    body = sections[0].text()
+    # Find the unheaded body section (first section with no heading)
+    body_index = None
+    for i, section in enumerate(sections):
+        if not section.heading_line and any(item.strip() for item in section.lines):
+            body_index = i
+            break
+    if body_index is None:
+        return False
+    body = sections[body_index].text()
     if not body:
         return False
     if mode == "title":
@@ -449,20 +456,9 @@ def maybe_add_body_only_moment(bucket: dict[str, Any], sections: list[Section], 
         raise ValueError(f"unknown body_only_moment mode: {mode}")
     if not moment or is_loose_duplicate(moment, "\n\n".join(section.text() for section in sections if section.canonical == "moment")):
         return False
-    sections.append(Section("### moment", "moment", paragraphs_to_lines([moment])))
-    return True
-
-
-def maybe_wrap_unheaded_body_as_moment(sections: list[Section]) -> bool:
-    if any(section.canonical == "moment" for section in sections):
-        return False
-    if not sections or sections[0].heading_line:
-        return False
-    body = sections[0].text()
-    if not body:
-        return False
-    sections[0].heading_line = "### moment"
-    sections[0].heading = "moment"
+    # Insert moment section after the body section
+    moment_section = Section("### moment", "moment", paragraphs_to_lines([moment]))
+    sections.insert(body_index + 1, moment_section)
     return True
 
 

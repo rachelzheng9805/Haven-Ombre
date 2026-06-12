@@ -1,3 +1,4 @@
+from memory_relevance import memory_relevance_options_from_config
 from recall_policy import RecallPolicy
 
 
@@ -66,6 +67,53 @@ def test_recall_query_plan_centralizes_runtime_query_gates():
     assert repair.allow_caution_diffusion
 
 
+def test_query_anchor_plan_blocks_mismatched_emotional_direct_candidate():
+    policy = RecallPolicy()
+
+    plan = policy.build_query_anchor_plan("今天为什么焦虑哭了吗")
+
+    assert plan.route == "emotional_reason"
+    assert plan.must_groups == (("焦虑", "哭"),)
+    assert not policy.direct_candidate_satisfies_anchor_plan(
+        {"text": "那天用户因为记忆工具跑通而激动到哭。"},
+        plan,
+    )
+    assert policy.direct_candidate_satisfies_anchor_plan(
+        {"text": "那天用户因为简历没有回音，焦虑得哭出来。"},
+        plan,
+    )
+
+
+def test_query_anchor_plan_disallows_bare_cry_direct():
+    policy = RecallPolicy()
+
+    plan = policy.build_query_anchor_plan("哭")
+
+    assert plan.route == "affect_only"
+    assert not plan.allow_direct
+    assert not policy.direct_candidate_satisfies_anchor_plan(
+        {"text": "今天她哭了，但单字哭不能作为可靠召回锚点。"},
+        plan,
+    )
+
+
+def test_query_anchor_plan_requires_event_and_emotion_for_grievance():
+    policy = RecallPolicy()
+
+    plan = policy.build_query_anchor_plan("哥哥知道我那次为什么被妈妈说得委屈吗")
+
+    assert plan.route == "emotional_reason"
+    assert ("妈妈", "委屈") in plan.must_groups
+    assert policy.direct_candidate_satisfies_anchor_plan(
+        {"text": "妈妈说了那件事，用户很委屈。"},
+        plan,
+    )
+    assert not policy.direct_candidate_satisfies_anchor_plan(
+        {"text": "妈妈电话后，用户心里乱了一下。"},
+        plan,
+    )
+
+
 def test_auto_vague_query_without_topic_is_suppressed():
     policy = RecallPolicy()
 
@@ -74,14 +122,25 @@ def test_auto_vague_query_without_topic_is_suppressed():
     assert policy.is_auto_query_too_vague("今天怎么样")
     assert policy.is_auto_query_too_vague("开心^^")
     assert policy.is_auto_query_too_vague("我有点难过。")
+    assert policy.is_auto_query_too_vague("哭")
+    assert policy.is_auto_query_too_vague("我哭了")
     assert policy.is_auto_query_too_vague("要不要回复一下。或者跟个“嗯。”")
     assert policy.is_auto_query_too_vague("那次要不要回个嗯")
     assert policy.is_auto_query_too_vague("这条帖子可以评论一下吗")
+    assert policy.is_auto_query_too_vague("🥺")
+    assert policy.is_auto_query_too_vague("qwq")
+    assert policy.is_auto_query_too_vague("哈哈")
+    assert policy.is_auto_query_too_vague("嗯～")
+    assert policy.is_auto_query_too_vague("你会想到什么")
+    assert policy.is_auto_query_too_vague("试一下handoff😽")
+    assert not policy.is_auto_query_too_vague("好吃030")
     assert not policy.is_auto_query_too_vague("最近蓝鲸档案")
     assert not policy.is_auto_query_too_vague("今天猫咪药量")
+    assert not policy.is_auto_query_too_vague("今天为什么激动哭")
     assert not policy.is_auto_query_too_vague("折角那次要不要回复")
     assert not policy.is_auto_query_too_vague("花园帖子要不要回复")
     assert not policy.is_auto_query_too_vague("handoff bridge 注入 读图 原文")
+    assert not policy.is_auto_query_too_vague("试一下召回 handoff")
 
     decision = policy.assess(
         "这张图片的上下文我想起来了",
@@ -105,6 +164,39 @@ def test_auto_vague_query_without_topic_is_suppressed():
     assert not affect_decision.admit_direct
 
 
+def test_short_taste_query_requires_real_taste_evidence():
+    policy = RecallPolicy()
+
+    meal_plan = {
+        "content": "用户排到下午答辩，决定在学校好好吃一顿再上场。",
+        "metadata": {"name": "答辩日与出行决策", "tags": ["午饭"], "domain": ["事务"]},
+    }
+    metaphor = {
+        "content": "下次安利挑对地方，不要在别人家门口夸隔壁好吃。",
+        "metadata": {"name": "用户在群内安利竞品", "tags": ["社交"], "domain": ["社交"]},
+    }
+    taste = {
+        "content": "用户上次觉得瘦肉丸很好吃，汤也舒服。",
+        "metadata": {"name": "瘦肉丸口味", "tags": ["饮食"], "domain": ["日常"]},
+    }
+    bad_taste = {
+        "content": "用户觉得那家店难吃，下次不去了。",
+        "metadata": {"name": "饭店踩雷", "tags": ["餐厅"], "domain": ["日常"]},
+    }
+
+    assert not policy.bucket_has_topic_evidence("好吃030", meal_plan)
+    assert not policy.bucket_has_topic_evidence("好吃030", metaphor)
+    assert policy.bucket_has_topic_evidence("好吃030", taste)
+    assert policy.bucket_has_topic_evidence("难吃", bad_taste)
+
+    decision = policy.assess("好吃030", meal_plan, auto=True)
+    assert decision.reason == "short_taste_query_without_taste_evidence"
+    assert not decision.admit_direct
+
+    good_decision = policy.assess("好吃030", taste, auto=True)
+    assert good_decision.admit_direct
+
+
 def test_auto_concrete_topic_query_marks_short_chinese_topics_for_context_filtering():
     policy = RecallPolicy()
 
@@ -117,11 +209,42 @@ def test_auto_concrete_topic_query_marks_short_chinese_topics_for_context_filter
     assert not policy.is_auto_concrete_topic_query("用户")
 
 
+def test_ai_reaction_name_uses_identity_config():
+    policy = RecallPolicy(ai_reaction_names=["Lapis"])
+
+    assert policy.is_auto_query_too_vague("Lapis")
+    assert not policy.is_auto_query_too_vague("Atlas")
+
+
 def test_topic_evidence_terms_are_filtered_once_in_policy():
     policy = RecallPolicy()
 
     assert policy.specific_query_terms("FF14 进度 偏好") == ["FF14"]
     assert policy.specific_query_terms("v2.0 状态") == ["v2.0"]
+
+
+def test_identity_aliases_are_not_recall_topic_evidence():
+    options = memory_relevance_options_from_config(
+        {
+            "identity": {
+                "ai_name": "Lapis",
+                "user_name": "Nina",
+                "user_display_name": "妮娜",
+                "user_aliases": ["访客", "她"],
+            }
+        }
+    )
+    policy = RecallPolicy(options=options, ai_reaction_names=["Lapis"])
+
+    assert policy.specific_query_terms("Nina 妮娜 Lapis user username 访客") == []
+    assert policy.specific_query_terms("Nina FF14 进度") == ["FF14"]
+    assert not policy.bucket_has_topic_evidence(
+        "Nina",
+        {
+            "content": "Nina 和 Lapis 的日常记录。",
+            "metadata": {"name": "妮娜画像", "tags": ["访客"], "domain": ["关系"]},
+        },
+    )
 
 
 def test_bucket_topic_evidence_uses_content_title_tags_domain_but_not_comments():

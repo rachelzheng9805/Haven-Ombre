@@ -236,6 +236,7 @@ fi
 
 print_env_status "OMBRE_API_KEY" "（脱水/导入抽取默认使用）"
 print_env_status "OMBRE_EMBEDDING_API_KEY" "（embedding 独立 key，未配时可能回退脱水 key）"
+print_env_status "OMBRE_RERANKER_API_KEY" "（重排序独立 key；未配时默认复用 embedding key）"
 print_env_status "OMBRE_DREAM_API_KEY" "（夜梦模型 key；没开夜梦可忽略）"
 if service_in_compose "${GATEWAY_SERVICE}"; then
   print_env_status "OMBRE_GATEWAY_TOKEN" "（Gateway 对外鉴权 token）"

@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from favorite_tags import GENERIC_FAVORITE_TAG, has_favorite_memory_tag
 
 LAYER_CORE = "core_memory"
 LAYER_ANCHOR = "long_term_anchor"
@@ -65,8 +66,7 @@ RELATIONSHIP_WEATHER_TAGS = frozenset(
     {"relationship_weather", "daily_impression", "weekly_impression"}
 )
 RAW_SOURCE_TAGS = frozenset({"raw_source", "chat_log", "diary_source", "source_record"})
-FAVORITE_TAG = "haven_favorite"
-FAVORITE_PREFIX = "flavor_"
+FAVORITE_TAG = GENERIC_FAVORITE_TAG
 
 SUBJECT_ALIASES = {
     "user": WRITE_SUBJECT_USER,
@@ -634,7 +634,7 @@ def _tags(meta: dict[str, Any]) -> set[str]:
 
 
 def _has_favorite_tag(tags: set[str]) -> bool:
-    return FAVORITE_TAG in tags or any(tag.startswith(FAVORITE_PREFIX) for tag in tags)
+    return has_favorite_memory_tag(tags)
 
 
 def _truthy(value: object) -> bool:

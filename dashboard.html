@@ -485,6 +485,25 @@
   .content-edit-form {
     margin-top: 12px;
   }
+  .title-edit-form {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+  }
+  .title-edit-form input[type="text"] {
+    flex: 1;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: inherit;
+  }
+  .title-edit-form .content-edit-actions {
+    display: flex;
+    gap: 4px;
+  }
   .content-edit-form textarea {
     width: 100%;
     min-height: 220px;
@@ -1755,6 +1774,23 @@
   .portrait-row-meta {
     margin-top: 6px;
   }
+  .portrait-row-meta button {
+    min-height: 24px;
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--surface);
+    color: var(--text-dim);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+  }
+  .portrait-row-meta button.danger { color: var(--negative); }
+  .portrait-row-meta button:hover {
+    border-color: var(--border-strong);
+    color: var(--accent);
+  }
+  .portrait-row-meta button.danger:hover { color: var(--negative); }
   .portrait-evidence {
     margin-top: 5px;
     color: var(--text-light);
@@ -2213,6 +2249,23 @@
       </div>
       <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 220；设 0 可关闭 Gateway 的 Diffused Memory 注入</div>
       <div class="config-row">
+        <label>细节二次取回</label>
+        <select id="cfg-memory-detail-recall-enabled">
+          <option value="false">关闭</option>
+          <option value="true">开启</option>
+        </select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">开启后非流式回复可用已注入 bucket_id 做一次内部细节 retry；Targeted Memory Detail 不依赖这个开关</div>
+      <div class="config-row">
+        <label>细节条数</label>
+        <input type="number" id="cfg-memory-detail-recall-max-ids" min="1" max="3" />
+      </div>
+      <div class="config-row">
+        <label>细节预算</label>
+        <input type="number" id="cfg-memory-detail-recall-budget" min="200" max="4000" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认最多 3 条、1200 token；只接受本轮已经注入过的 bucket_id</div>
+      <div class="config-row">
         <label>直命中形状</label>
         <select id="cfg-direct-render-mode">
           <option value="auto">auto</option>
@@ -2229,6 +2282,22 @@
         </select>
       </div>
       <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">graph 是 p0 图召回；bucket 是接近 main 的直命中对照档</div>
+      <div class="config-row">
+        <label>词图辅助</label>
+        <select id="cfg-word-map-hint-enabled">
+          <option value="false">关闭</option>
+          <option value="true">开启</option>
+        </select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认关闭；开启后词图只作为弱候选提示，仍需通过召回门控</div>
+      <div class="config-row">
+        <label>LLM拆句</label>
+        <select id="cfg-query-planner-enabled">
+          <option value="false">关闭</option>
+          <option value="true">开启</option>
+        </select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后不再额外调用脱水模型拆检索词；刚刚、日期和可靠直命中不受影响</div>
       <div class="config-row">
         <label>旧记忆随机</label>
         <select id="cfg-query-resurface-enabled">
@@ -2344,8 +2413,9 @@
         <p>新窗口 handoff 当前使用的每日画像状态；只读，不写 profile_fact、anchor 或 Core Memory。</p>
       </div>
       <div class="profile-actions">
-        <button type="button" onclick="loadPortraitState()">刷新</button>
+        <button type="button" onclick="refreshPortraitView()">刷新</button>
         <button type="button" onclick="runPortraitMaintain()">手动生成</button>
+        <button type="button" class="danger" onclick="resetPortraitState()">清空画像</button>
       </div>
     </div>
     <section class="portrait-state-panel" id="portrait-state-panel">
@@ -2534,6 +2604,41 @@
     </div>
 
     <div class="config-section">
+      <h3>重排序 Reranker</h3>
+      <div class="config-row">
+        <label>启用</label>
+        <select id="cfg-reranker-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后 Gateway 和 breath 不再等待重排序模型</div>
+      <div class="config-row">
+        <label>Model</label>
+        <input type="text" id="cfg-reranker-model" placeholder="Qwen/Qwen3-Reranker-4B" />
+      </div>
+      <div class="config-row">
+        <label>Base URL</label>
+        <input type="text" id="cfg-reranker-url" placeholder="留空复用 Embedding Base URL" />
+      </div>
+      <div class="config-row">
+        <label>API Key</label>
+        <input type="password" id="cfg-reranker-key" placeholder="当前: 加载中…" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">留空时复用 Embedding API Key。API Key 不会持久化到 yaml（请用环境变量）</div>
+      <div class="config-row">
+        <label>Timeout</label>
+        <input type="number" id="cfg-reranker-timeout" min="1" max="120" step="0.5" />
+      </div>
+      <div class="config-row">
+        <label>候选上限</label>
+        <input type="number" id="cfg-reranker-candidates" min="1" max="100" />
+      </div>
+      <div class="config-row">
+        <label>重排权重</label>
+        <input type="number" id="cfg-reranker-weight" min="0" max="1" step="0.05" />
+      </div>
+      <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 12 秒 / 20 个候选 / 0.65；旧配置没有 reranker 段时，保存会自动补上</div>
+    </div>
+
+    <div class="config-section">
       <h3>Persona State</h3>
       <div class="config-row">
         <label>启用</label>
@@ -2696,6 +2801,15 @@
         <input type="number" id="cfg-portrait-first-limit" min="1" max="500" />
       </div>
       <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">第一次画像初始化可适当调大；之后每天只看当天新增/更新的记忆材料</div>
+    </div>
+
+    <div class="config-section">
+      <h3>自我入口</h3>
+      <div class="config-row">
+        <label>总入口 bucket</label>
+        <input type="text" id="cfg-self-anchor-entry" placeholder="留空按最高分自我桶 fallback" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">handoff 和画像页只读这一条；不会把它设成普通 anchor</div>
     </div>
 
     <div class="config-section">
@@ -2905,7 +3019,8 @@ document.getElementById('search-input').addEventListener('input', (e) => {
   }, 300);
 });
 
-async function loadBuckets() {
+async function loadBuckets(options) {
+  options = options || {};
   try {
     const res = await authFetch(BASE + '/api/buckets');
     if (!res) return;
@@ -2921,7 +3036,7 @@ async function loadBuckets() {
     renderBuckets(filterBuckets(allBuckets));
     if (getActiveTab() === 'reflection') renderReflectionReview();
     if (getActiveTab() === 'dreams') loadDreams();
-    if (getActiveTab() === 'profile') {
+    if (getActiveTab() === 'profile' && !options.skipProfileRefresh) {
       loadPortraitState();
       loadProfileFacts();
     }
@@ -3014,6 +3129,19 @@ function isDailyImpressionBucket(bucket) {
   return bucket.type === 'feel'
     && tags.includes('relationship_weather')
     && tags.includes('daily_impression');
+}
+
+function bucketTags(bucket) {
+  return (bucket && bucket.tags || []).map(function(tag) {
+    return String(tag || '').trim();
+  }).filter(Boolean);
+}
+
+function isSelfAnchorBucket(bucket) {
+  if (!bucket) return false;
+  if (bucket.self_anchor) return true;
+  var tags = bucketTags(bucket);
+  return tags.includes('自我') || tags.includes('self_anchor') || tags.includes('first_person_anchor');
 }
 
 function getDailyImpressions() {
@@ -3247,6 +3375,32 @@ async function runPortraitMaintain() {
   }
 }
 
+async function refreshPortraitView() {
+  await loadBuckets({ skipProfileRefresh: true });
+  await loadPortraitState();
+  await loadProfileFacts();
+}
+
+async function resetPortraitState() {
+  var typed = prompt('输入 RESET 清空 Portrait State。下一次手动生成会按第一次生成运行。');
+  if (typed !== 'RESET') return;
+  setPortraitMaintainMessage('清空中…', '');
+  try {
+    var res = await authFetch(BASE + '/api/portrait-state/reset', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ confirm: 'RESET' })
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '清空失败');
+    setPortraitMaintainMessage('已清空画像；下一次手动生成会按第一次生成。', 'ok');
+    await loadPortraitState();
+  } catch (e) {
+    setPortraitMaintainMessage('清空失败: ' + e.message, 'error');
+  }
+}
+
 function renderPortraitState(data) {
   var content = document.getElementById('portrait-state-content');
   var summary = document.getElementById('portrait-state-summary');
@@ -3264,15 +3418,51 @@ function renderPortraitState(data) {
     '<span class="profile-chip">state ' + esc(state.state_path || '—') + '</span>' +
   '</div>';
   content.innerHTML =
+    renderPortraitSelfAnchor(state.self_anchor_entry) +
+    renderPortraitTimeline(state.recent_timeline, state.recent_activities) +
     '<div class="portrait-state-grid">' +
       renderPortraitScope('user', portrait.user || {}) +
-      renderPortraitScope('persona', portrait.persona || {}) +
       renderPortraitScope('relationship', portrait.relationship || {}) +
     '</div>' +
     '<div class="portrait-candidate-grid">' +
       renderPortraitCandidates('Stable Candidates', state.stable_candidates) +
       renderPortraitCandidates('Profile Fact Candidates', state.profile_fact_candidates) +
     '</div>';
+}
+
+function bucketTimeValue(bucket) {
+  var raw = bucket && (bucket.updated_at || bucket.last_active || bucket.created || bucket.date) || '';
+  var time = Date.parse(raw);
+  return Number.isFinite(time) ? time : 0;
+}
+
+function renderPortraitSelfAnchor(entry) {
+  var rows = entry && entry.bucket_id ? [{
+    text: entry.text || entry.name || entry.bucket_id || '',
+    scope: entry.configured ? '自我总入口' : '自我总入口 fallback',
+    updated_at: entry.updated_at || '',
+    evidence: [{ bucket_id: entry.bucket_id }]
+  }] : [];
+  return '<section class="portrait-scope portrait-self-anchor">' +
+    '<div class="portrait-layer-title">自我总入口</div>' +
+    renderPortraitRows(rows, '还没有自我总入口。') +
+  '</section>';
+}
+
+function renderPortraitTimeline(timeline, recentActivities) {
+  var rows = portraitRows(timeline);
+  var area = 'recent_timeline';
+  if (!rows.length) {
+    rows = portraitRows(recentActivities);
+    area = 'recent_activities';
+  }
+  rows = rows.slice(0, 8).map(function(row, index) {
+    return withPortraitDelete(row, { area: area, index: index, text: row && row.text || '' });
+  });
+  return '<section class="portrait-scope portrait-timeline">' +
+    '<div class="portrait-layer-title">Recent Timeline</div>' +
+    renderPortraitRows(rows, '还没有 recent timeline。') +
+  '</section>';
 }
 
 function renderPortraitScope(scope, scopeState) {
@@ -3284,19 +3474,35 @@ function renderPortraitScope(scope, scopeState) {
   var stableRows = scopeState.stable ? [{
     text: scopeState.stable,
     evidence: scopeState.stable_evidence || [],
+    source_dates: scopeState.stable_source_dates || [],
+    source_date: scopeState.stable_source_date || '',
     updated_at: scopeState.stable_updated_at || ''
   }] : [];
   var midRows = scopeState.mid_term ? [{
     text: scopeState.mid_term,
     evidence: scopeState.mid_term_evidence || [],
+    source_dates: scopeState.mid_term_source_dates || [],
+    source_date: scopeState.mid_term_source_date || '',
     updated_at: scopeState.mid_term_updated_at || ''
   }] : [];
+  stableRows = stableRows.map(function(row) {
+    return withPortraitDelete(row, { area: 'portrait', scope: scope, layer: 'stable', text: row.text || '' });
+  });
+  midRows = midRows.map(function(row) {
+    return withPortraitDelete(row, { area: 'portrait', scope: scope, layer: 'mid_term', text: row.text || '' });
+  });
+  var stagingRows = portraitRows(scopeState.staging_pool).slice(0, 6).map(function(row, index) {
+    return withPortraitDelete(row, { area: 'portrait', scope: scope, layer: 'staging_pool', index: index, text: row && row.text || '' });
+  });
+  var recentRows = portraitRows(scopeState.recent_buffer).slice(0, 6).map(function(row, index) {
+    return withPortraitDelete(row, { area: 'portrait', scope: scope, layer: 'recent_buffer', index: index, text: row && row.text || '' });
+  });
   return '<section class="portrait-scope">' +
     '<h3>' + esc(labels[scope] || scope) + '</h3>' +
     renderPortraitLayer('stable', stableRows, '还没有 stable portrait。') +
     renderPortraitLayer('mid term', midRows, '还没有 mid-term portrait。') +
-    renderPortraitLayer('staging pool', portraitRows(scopeState.staging_pool).slice(0, 6), 'staging pool 为空。') +
-    renderPortraitLayer('recent buffer', portraitRows(scopeState.recent_buffer).slice(0, 6), 'recent buffer 为空。') +
+    renderPortraitLayer('staging pool', stagingRows, 'staging pool 为空。') +
+    renderPortraitLayer('recent buffer', recentRows, 'recent buffer 为空。') +
   '</section>';
 }
 
@@ -3314,11 +3520,34 @@ function renderPortraitRows(rows, emptyText) {
 }
 
 function renderPortraitCandidates(title, candidates) {
-  var rows = portraitRows(candidates).slice(-8).reverse();
+  var area = title.indexOf('Stable') === 0 ? 'stable_candidates' : 'profile_fact_candidates';
+  var rows = portraitRows(candidates).map(function(row, index) {
+    return withPortraitDelete(row, { area: area, index: index, text: row && row.text || '' });
+  }).slice(-8).reverse();
   return '<section class="portrait-candidates">' +
     '<h3>' + esc(title) + '</h3>' +
     renderPortraitRows(rows, '没有候选。') +
   '</section>';
+}
+
+function withPortraitDelete(row, spec) {
+  row = Object.assign({}, row || {});
+  row._delete = spec;
+  return row;
+}
+
+function portraitRowDateLabel(item) {
+  if (item.time_label) return 'time ' + item.time_label;
+  var dates = Array.isArray(item.source_dates) ? item.source_dates.filter(Boolean) : [];
+  if (item.source_date) dates.unshift(item.source_date);
+  var seen = [];
+  dates.forEach(function(date) {
+    date = String(date || '').trim();
+    if (date && seen.indexOf(date) === -1) seen.push(date);
+  });
+  if (seen.length) return 'source ' + seen.slice(0, 3).join(', ');
+  if (item.last_seen_date) return 'seen ' + item.last_seen_date;
+  return item.updated_at || item.created_at || '';
 }
 
 function renderPortraitRow(item) {
@@ -3332,16 +3561,45 @@ function renderPortraitRow(item) {
   if (item.object) meta.push(item.object);
   if (item.confidence != null) meta.push('confidence ' + Number(item.confidence || 0).toFixed(2));
   if (item.count) meta.push('seen ' + item.count);
-  if (item.updated_at || item.last_seen_date || item.created_at) {
-    meta.push(item.updated_at || item.last_seen_date || item.created_at);
-  }
+  var dateLabel = portraitRowDateLabel(item);
+  if (dateLabel) meta.push(dateLabel);
+  var deleteSpec = item._delete ? escAttr(jsString(JSON.stringify(item._delete))) : '';
+  var deleteButton = deleteSpec
+    ? '<button type="button" class="danger" onclick="deletePortraitStateItem(\'' + deleteSpec + '\')">删除</button>'
+    : '';
   return '<div class="portrait-row">' +
     '<div class="portrait-row-text">' + esc(text) + '</div>' +
     (meta.length ? '<div class="portrait-row-meta">' + meta.map(function(part) {
       return '<span class="profile-chip">' + esc(part) + '</span>';
-    }).join('') + '</div>' : '') +
+    }).join('') + deleteButton + '</div>' : (deleteButton ? '<div class="portrait-row-meta">' + deleteButton + '</div>' : '')) +
     renderPortraitEvidence(item.evidence) +
   '</div>';
+}
+
+async function deletePortraitStateItem(specJson) {
+  var spec;
+  try {
+    spec = JSON.parse(specJson || '{}');
+  } catch (e) {
+    alert('删除参数错误。');
+    return;
+  }
+  if (!confirm('删除这条画像记录？')) return;
+  spec.confirm = 'DELETE';
+  try {
+    var res = await authFetch(BASE + '/api/portrait-state/items', {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(spec)
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || data.reason || '删除失败');
+    setPortraitMaintainMessage('已删除画像记录。', 'ok');
+    await loadPortraitState();
+  } catch (e) {
+    setPortraitMaintainMessage('删除失败: ' + e.message, 'error');
+  }
 }
 
 function renderPortraitEvidence(evidence) {
@@ -3631,6 +3889,7 @@ function renderProfileFactCard(fact) {
         confirmButton +
         '<button type="button" onclick="editProfileFact(\'' + jsString(id) + '\')">编辑</button>' +
         '<button type="button" class="danger" onclick="runProfileFactAction(\'' + jsString(id) + '\', \'deprecate\')">废弃</button>' +
+        '<button type="button" class="danger" onclick="deleteProfileFact(\'' + jsString(id) + '\')">删除</button>' +
         '<button type="button" onclick="showDetail(\'' + jsString(id) + '\')">打开</button>' +
       '</div>' +
     '</div>' +
@@ -3661,6 +3920,26 @@ async function runProfileFactAction(id, action, payload) {
     await loadBuckets();
   } catch (e) {
     alert('画像事实操作失败: ' + e.message);
+  }
+}
+
+async function deleteProfileFact(id) {
+  var fact = profileFactById(id);
+  if (!fact) return;
+  if (!confirm('彻底删除这条画像事实？\n\n' + (fact.fact || id))) return;
+  try {
+    var res = await authFetch(BASE + '/api/profile-facts/' + encodeURIComponent(id), {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ confirm: 'DELETE' })
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || data.reason || '删除失败');
+    await loadProfileFacts();
+    await loadBuckets();
+  } catch (e) {
+    alert('画像事实删除失败: ' + e.message);
   }
 }
 
@@ -3881,6 +4160,7 @@ function updateStats() {
 function buildFilters() {
   const domains = new Set();
   allBuckets.forEach(b => (b.domain || []).forEach(d => domains.add(d)));
+  const profileDomainAliases = new Set(['preference', 'project_milestone', 'relationship_anchor']);
   const filters = document.getElementById('filters');
   const types = [
     { key: 'all', label: '全部' },
@@ -3891,20 +4171,28 @@ function buildFilters() {
     { key: 'digested', label: '🌿 已消化' },
     { key: 'archived', label: '📦 归档' },
   ];
+  if (allBuckets.some(isSelfAnchorBucket)) types.push({ key: 'tag:self_anchor', label: '自我' });
+  const domainFilters = Array.from(domains).filter(function(d) {
+    return !profileDomainAliases.has(String(d || '').trim());
+  }).slice(0, 10).map(function(d) {
+    return { key: 'domain:' + d, label: d };
+  });
+  const availableFilters = types.concat(domainFilters).map(function(t) { return t.key; });
+  if (availableFilters.indexOf(currentFilter) === -1) currentFilter = 'all';
   filters.innerHTML = types.map(function(t) {
-    return '<button class="filter-btn ' + (t.key === 'all' ? 'active' : '') + '" data-filter="' + escAttr(t.key) + '">' + esc(t.label) + '</button>';
-  }).join('') + Array.from(domains).slice(0, 10).map(function(d) {
-    return '<button class="filter-btn" data-filter="' + escAttr('domain:' + d) + '">' + esc(d) + '</button>';
+    return '<button class="filter-btn ' + (t.key === currentFilter ? 'active' : '') + '" data-filter="' + escAttr(t.key) + '">' + esc(t.label) + '</button>';
+  }).join('') + domainFilters.map(function(d) {
+    return '<button class="filter-btn ' + (d.key === currentFilter ? 'active' : '') + '" data-filter="' + escAttr(d.key) + '">' + esc(d.label) + '</button>';
   }).join('');
 
-  filters.addEventListener('click', function(e) {
+  filters.onclick = function(e) {
     var btn = e.target.closest('.filter-btn');
     if (!btn) return;
     filters.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
     btn.classList.add('active');
     currentFilter = btn.dataset.filter;
     renderBuckets(filterBuckets(allBuckets));
-  });
+  };
 }
 
 function filterBuckets(buckets) {
@@ -3915,6 +4203,11 @@ function filterBuckets(buckets) {
   if (currentFilter === 'unresolved') return buckets.filter(function(b) { return !b.resolved && b.type !== 'permanent' && !b.pinned; });
   if (currentFilter === 'digested') return buckets.filter(function(b) { return b.digested; });
   if (currentFilter === 'archived') return buckets.filter(function(b) { return b.type === 'archived' || b.score < 0.3; });
+  if (currentFilter === 'tag:self_anchor') return buckets.filter(isSelfAnchorBucket);
+  if (currentFilter.startsWith('tag:')) {
+    var tag = currentFilter.slice(4);
+    return buckets.filter(function(b) { return bucketTags(b).includes(tag); });
+  }
   if (currentFilter.startsWith('domain:')) {
     var d = currentFilter.slice(7);
     return buckets.filter(function(b) { return (b.domain || []).includes(d); });
@@ -4138,7 +4431,15 @@ async function showDetail(id) {
       '</form>';
     content.innerHTML =
       '<div class="detail-title-row">' +
-        '<h2>' + esc(meta.name || id) + '</h2>' +
+        '<h2 id="bucket-title-view">' + esc(meta.name || id) + '</h2>' +
+        '<button id="bucket-title-edit-button" type="button" class="detail-edit-button" onclick="startBucketTitleEdit()" aria-label="编辑标题" title="编辑标题">✎</button>' +
+        '<form id="bucket-title-edit" class="title-edit-form hidden" onsubmit="submitBucketTitleEdit(event, \'' + jsString(id) + '\')">' +
+          '<input name="title" type="text" value="' + escAttr(meta.name || '') + '" maxlength="40" placeholder="标题" />' +
+          '<div class="content-edit-actions">' +
+            '<button type="button" class="secondary" onclick="cancelBucketTitleEdit()">取消</button>' +
+            '<button type="submit">保存</button>' +
+          '</div>' +
+        '</form>' +
       '</div>' +
       '<div class="detail-meta">' +
         '<div class="field"><label>ID</label>' + esc(id) + '</div>' +
@@ -4293,6 +4594,56 @@ function formatMomentSource(ref) {
   var end = ref.end_line || '';
   var line = start ? ':' + start + (end && end !== start ? '-' + end : '') : '';
   return (path ? path + ' · ' : '') + source + line;
+}
+
+function startBucketTitleEdit() {
+  var view = document.getElementById('bucket-title-view');
+  var form = document.getElementById('bucket-title-edit');
+  var editButton = document.getElementById('bucket-title-edit-button');
+  if (!view || !form) return;
+  view.classList.add('hidden');
+  form.classList.remove('hidden');
+  if (editButton) editButton.classList.add('hidden');
+  var input = form.querySelector('input[name="title"]');
+  if (input) { input.focus(); input.select(); }
+}
+
+function cancelBucketTitleEdit() {
+  var view = document.getElementById('bucket-title-view');
+  var form = document.getElementById('bucket-title-edit');
+  var editButton = document.getElementById('bucket-title-edit-button');
+  if (!view || !form) return;
+  form.classList.add('hidden');
+  view.classList.remove('hidden');
+  if (editButton) editButton.classList.remove('hidden');
+}
+
+async function submitBucketTitleEdit(event, bucketId) {
+  event.preventDefault();
+  var form = event.target;
+  var input = form.querySelector('input[name="title"]');
+  var newName = (input.value || '').trim();
+  var button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  button.textContent = '保存中…';
+  try {
+    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(bucketId), {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: newName})
+    });
+    if (!res) return;
+    if (!res.ok) {
+      var data = await res.json().catch(() => ({}));
+      throw new Error(data.error || '保存失败');
+    }
+    await showDetail(bucketId);
+    await loadBuckets();
+  } catch (e) {
+    alert('保存标题失败: ' + e.message);
+    button.disabled = false;
+    button.textContent = '保存';
+  }
 }
 
 function startBucketContentEdit(bucketId) {
@@ -5507,6 +5858,16 @@ async function loadConfig() {
     document.getElementById('cfg-emb-url').value = cfg.embedding.base_url || '';
     document.getElementById('cfg-emb-key').placeholder = '当前: ' + (cfg.embedding.api_key_masked || (cfg.embedding.has_own_api_key ? '***' : '复用脱水 API'));
     document.getElementById('cfg-emb-key').value = '';
+    var reranker = cfg.reranker || {};
+    document.getElementById('cfg-reranker-enabled').value = reranker.enabled ? 'true' : 'false';
+    document.getElementById('cfg-reranker-model').value = reranker.model || '';
+    document.getElementById('cfg-reranker-url').value = reranker.base_url || '';
+    document.getElementById('cfg-reranker-key').placeholder =
+      '当前: ' + (reranker.api_key_masked || (reranker.has_own_api_key ? '***' : (reranker.api_ready ? '复用向量 API' : '未设置')));
+    document.getElementById('cfg-reranker-key').value = '';
+    document.getElementById('cfg-reranker-timeout').value = reranker.timeout_seconds ?? 12;
+    document.getElementById('cfg-reranker-candidates').value = reranker.candidate_limit ?? 20;
+    document.getElementById('cfg-reranker-weight').value = reranker.score_weight ?? 0.65;
     document.getElementById('cfg-persona-enabled').value =
       (cfg.persona && cfg.persona.enabled) === false ? 'false' : 'true';
     document.getElementById('cfg-persona-event-recording').value =
@@ -5544,11 +5905,21 @@ async function loadConfig() {
       (cfg.gateway && cfg.gateway.recalled_memory_budget) ?? 400;
     document.getElementById('cfg-related-memory-budget').value =
       (cfg.gateway && cfg.gateway.related_memory_budget) ?? 220;
+    document.getElementById('cfg-memory-detail-recall-enabled').value =
+      (cfg.gateway && cfg.gateway.memory_detail_recall_enabled) ? 'true' : 'false';
+    document.getElementById('cfg-memory-detail-recall-max-ids').value =
+      (cfg.gateway && cfg.gateway.memory_detail_recall_max_ids) ?? 3;
+    document.getElementById('cfg-memory-detail-recall-budget').value =
+      (cfg.gateway && cfg.gateway.memory_detail_recall_budget) ?? 1200;
     var personaRounds = (cfg.gateway && cfg.gateway.current_inner_state_interval_rounds) ?? 15;
     document.getElementById('cfg-persona-context-enabled').value = personaRounds > 0 ? 'true' : 'false';
     document.getElementById('cfg-persona-context-rounds').value = personaRounds;
     document.getElementById('cfg-direct-render-mode').value = (cfg.gateway && cfg.gateway.direct_render_mode) || 'auto';
     document.getElementById('cfg-retrieval-mode').value = (cfg.gateway && cfg.gateway.retrieval_mode) || 'graph';
+    document.getElementById('cfg-word-map-hint-enabled').value =
+      (cfg.gateway && cfg.gateway.word_map_hint_enabled) ? 'true' : 'false';
+    document.getElementById('cfg-query-planner-enabled').value =
+      (cfg.gateway && cfg.gateway.query_planner_enabled) ? 'true' : 'false';
     document.getElementById('cfg-query-resurface-enabled').value =
       (cfg.recall && cfg.recall.query_resurface_enabled) ? 'true' : 'false';
     var diffusion = cfg.memory_diffusion || {};
@@ -5586,6 +5957,8 @@ async function loadConfig() {
       (cfg.portrait && cfg.portrait.material_limit) ?? 18;
     document.getElementById('cfg-portrait-first-limit').value =
       (cfg.portrait && cfg.portrait.first_run_material_limit) ?? 160;
+    document.getElementById('cfg-self-anchor-entry').value =
+      (cfg.self_anchor && cfg.self_anchor.entry_bucket_id) || '';
     document.getElementById('cfg-merge').value = cfg.merge_threshold ?? 75;
     document.getElementById('config-readonly').innerHTML =
       'Transport: <strong>' + esc(cfg.transport) + '</strong><br>' +
@@ -5595,7 +5968,8 @@ async function loadConfig() {
       'Portrait API: <strong>' + ((cfg.portrait && cfg.portrait.api_ready) ? '已设置' : '未设置') + '</strong><br>' +
       'Portrait state: <strong>' + esc((cfg.portrait && cfg.portrait.state_path) || '默认') + '</strong><br>' +
       'Dream API: <strong>' + (cfg.dream.api_ready ? '已设置' : '未设置') + '</strong><br>' +
-      'Embedding effective URL: <strong>' + esc(cfg.embedding.effective_base_url || '未设置') + '</strong>';
+      'Embedding effective URL: <strong>' + esc(cfg.embedding.effective_base_url || '未设置') + '</strong><br>' +
+      'Reranker effective URL: <strong>' + esc(reranker.effective_base_url || '未设置') + '</strong>';
   } catch (e) {
     setConfigStatus('<span style="color:var(--negative)">加载失败: ' + esc(e.message) + '</span>');
   }
@@ -5627,7 +6001,11 @@ async function saveConfig(persist, persistEnv) {
     if (typeof left === 'number' && typeof right === 'number') return Math.abs(left - right) < 0.000001;
     return JSON.stringify(left) === JSON.stringify(right);
   }
-  function addChangedSection(target, sectionName, candidate) {
+  function addChangedSection(target, sectionName, candidate, force) {
+    if (force) {
+      target[sectionName] = candidate;
+      return;
+    }
     var original = (configSnapshot && configSnapshot[sectionName]) || {};
     var changed = {};
     Object.keys(candidate).forEach(function(key) {
@@ -5648,10 +6026,23 @@ async function saveConfig(persist, persistEnv) {
   var candidate = {};
   if (activeTarget === 'config') {
     candidate.dehydration = {
+      model: document.getElementById('cfg-dehy-model').value,
       base_url: document.getElementById('cfg-dehy-url').value,
+      max_tokens: numberValue('cfg-dehy-maxtokens', 4096),
+      temperature: floatValue('cfg-dehy-temp', 0.3),
     };
     candidate.embedding = {
+      enabled: document.getElementById('cfg-emb-enabled').value === 'true',
+      model: document.getElementById('cfg-emb-model').value,
       base_url: document.getElementById('cfg-emb-url').value,
+    };
+    candidate.reranker = {
+      enabled: document.getElementById('cfg-reranker-enabled').value === 'true',
+      model: document.getElementById('cfg-reranker-model').value,
+      base_url: document.getElementById('cfg-reranker-url').value,
+      timeout_seconds: floatValue('cfg-reranker-timeout', 12),
+      candidate_limit: numberValue('cfg-reranker-candidates', 20),
+      score_weight: floatValue('cfg-reranker-weight', 0.65),
     };
     candidate.persona = {
       enabled: document.getElementById('cfg-persona-enabled').value === 'true',
@@ -5660,9 +6051,26 @@ async function saveConfig(persist, persistEnv) {
       base_url: document.getElementById('cfg-persona-url').value,
     };
     candidate.dream = {
+      enabled: document.getElementById('cfg-dream-engine-enabled').value === 'true',
+      auto_enabled: document.getElementById('cfg-dream-enabled').value === 'true',
+      surface_enabled: document.getElementById('cfg-dream-surface').value === 'true',
+      inject_enabled: document.getElementById('cfg-dream-inject').value === 'true',
+      retain_after_inject: document.getElementById('cfg-dream-retain').value === 'true',
+      model: document.getElementById('cfg-dream-model').value,
       base_url: document.getElementById('cfg-dream-url').value,
+      daily_hour: numberValue('cfg-dream-hour', 3),
+      daily_probability: floatValue('cfg-dream-prob', 0.4),
+      min_material_count: numberValue('cfg-dream-min', 5),
+      material_window_hours: numberValue('cfg-dream-window', 48),
+      identity_anchor_id: document.getElementById('cfg-dream-anchor').value,
     };
     candidate.reflection = {
+      enabled: document.getElementById('cfg-reflection-enabled').value === 'true',
+      auto_enabled: document.getElementById('cfg-reflection-auto').value === 'true',
+      daily_enabled: document.getElementById('cfg-reflection-daily').value === 'true',
+      memory_affect_anchor_enabled: document.getElementById('cfg-reflection-memory-anchor').value === 'true',
+      relationship_weather_affect_anchor_enabled: document.getElementById('cfg-reflection-weather-anchor').value === 'true',
+      model: document.getElementById('cfg-reflection-model').value,
       base_url: document.getElementById('cfg-reflection-url').value,
     };
     candidate.portrait = {
@@ -5672,6 +6080,9 @@ async function saveConfig(persist, persistEnv) {
       daily_enabled: document.getElementById('cfg-portrait-daily').value === 'true',
       material_limit: numberValue('cfg-portrait-material-limit', 18),
       first_run_material_limit: numberValue('cfg-portrait-first-limit', 160),
+    };
+    candidate.self_anchor = {
+      entry_bucket_id: document.getElementById('cfg-self-anchor-entry').value.trim(),
     };
   }
   if (activeTarget === 'memory-config') {
@@ -5683,9 +6094,14 @@ async function saveConfig(persist, persistEnv) {
       recent_context_budget: recentContextBudget,
       recalled_memory_budget: numberValue('cfg-recalled-memory-budget', 400),
       related_memory_budget: numberValue('cfg-related-memory-budget', 220),
+      memory_detail_recall_enabled: document.getElementById('cfg-memory-detail-recall-enabled').value === 'true',
+      memory_detail_recall_max_ids: numberValue('cfg-memory-detail-recall-max-ids', 3),
+      memory_detail_recall_budget: numberValue('cfg-memory-detail-recall-budget', 1200),
       current_inner_state_interval_rounds: personaContextRounds,
       direct_render_mode: document.getElementById('cfg-direct-render-mode').value,
       retrieval_mode: document.getElementById('cfg-retrieval-mode').value,
+      word_map_hint_enabled: document.getElementById('cfg-word-map-hint-enabled').value === 'true',
+      query_planner_enabled: document.getElementById('cfg-query-planner-enabled').value === 'true',
     };
     candidate.recall = {
       query_resurface_enabled: document.getElementById('cfg-query-resurface-enabled').value === 'true',
@@ -5705,9 +6121,17 @@ async function saveConfig(persist, persistEnv) {
     persist: persist,
     persist_env: !!persistEnv,
   };
+  var forceSections = {};
+  if (activeTarget === 'memory-config') {
+    forceSections.gateway = true;
+    forceSections.recall = true;
+    forceSections.memory_diffusion = true;
+  }
+
   [
     'dehydration',
     'embedding',
+    'reranker',
     'persona',
     'dream',
     'gateway',
@@ -5715,9 +6139,17 @@ async function saveConfig(persist, persistEnv) {
     'memory_diffusion',
     'reflection',
     'portrait',
+    'self_anchor',
   ].forEach(function(sectionName) {
-    if (candidate[sectionName]) addChangedSection(body, sectionName, candidate[sectionName]);
+    if (candidate[sectionName]) {
+      addChangedSection(body, sectionName, candidate[sectionName], !!forceSections[sectionName]);
+    }
   });
+
+  var mergeVal = numberValue('cfg-merge', 75);
+  if (configSnapshot && mergeVal !== (configSnapshot.merge_threshold ?? 75)) {
+    body.merge_threshold = mergeVal;
+  }
 
   var keyVal = document.getElementById('cfg-dehy-key').value;
   if (keyVal) {
@@ -5728,6 +6160,11 @@ async function saveConfig(persist, persistEnv) {
   if (embKeyVal) {
     if (!body.embedding) body.embedding = {};
     body.embedding.api_key = embKeyVal;
+  }
+  var rerankerKeyVal = document.getElementById('cfg-reranker-key').value;
+  if (rerankerKeyVal) {
+    if (!body.reranker) body.reranker = {};
+    body.reranker.api_key = rerankerKeyVal;
   }
   var personaKeyVal = document.getElementById('cfg-persona-key').value;
   if (personaKeyVal) {

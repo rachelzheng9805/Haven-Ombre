@@ -41,7 +41,7 @@ Do not collapse these into one generic summary. If only the user state matters, 
 | Recent context | recent non-core bucket, or recent context store | No, unless user explicitly asks recent | Compact recent block | Only on explicit recent query, 24h re-entry, or reliable dynamic context; has cooldown | `recent_context_cooldown_hours` | No | Keep original elsewhere |
 | Relationship weather | `type=feel`, `relationship_weather`, `daily_impression`, `weekly_impression` | No | Short weather/temperature block | Separate section; default mostly quiet | Interval/config gated | No direct seed; can color response | Keep affect text, not as topic proof |
 | Affect anchor / favorite reason / comments | section text in bucket or metadata comments | No | Auxiliary context only | Only attached to reliable target or favorite block | follows parent | No seed | Keep exact wording when intimate |
-| Favorite memory | `haven_favorite`, `flavor_*`, with reason | Not by tag alone | Small favorite card | Manual marker/header or configured interval | Separate budget | Can be source if also directly recalled | Keep reason |
+| Favorite memory | `ai_favorite`, legacy `haven_favorite`, or `<ai_name>_favorite`, with reason | Not by tag alone | Small favorite card | Manual marker/header or configured interval | Separate budget | Can be source if also directly recalled | Keep reason |
 | Dream | dream engine latent/surfaced item | Not normal recall seed | Original dream text | Surfaces once when dream resonance passes | Dream-level surface rules | Can later create edges/rings | Do not truncate in memory layer |
 | Diary / raw chat source | external diary, local chat log, imported source | No | Not injected as memory by default | Not direct gateway context | N/A | Extracted segments only | Preserve raw source outside buckets |
 | Archive / digested old memory | archived, `resolved`, `digested`, low activity | Usually no | Only on explicit search or resurfacing | Not automatic | Sinks strongly | Rare | Keep for lookup |
@@ -137,7 +137,7 @@ Gateway dynamic context should stay quiet and ordered:
 4. `Diffused Memory`
 5. Persona state
 6. `Relationship Weather`
-7. `Haven Favorite Memory`
+7. `<identity.ai_name> Favorite Memory`
 
 Core memory is stable context and should not compete with dynamic memory budget.
 

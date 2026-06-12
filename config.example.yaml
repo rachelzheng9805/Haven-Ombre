@@ -106,6 +106,12 @@ anchor:
   max_count: 12
   min_age_hours: 24
 
+# --- Self anchor / AI self entry ---
+# entry_bucket_id selects the total self entry used by handoff and portrait.
+# Empty = fall back to the highest-ranked self_anchor bucket.
+self_anchor:
+  entry_bucket_id: ""
+
 # --- Decay parameters / 记忆衰减参数 ---
 # Simulates Ebbinghaus forgetting curve, auto-archives inactive memories
 # 模拟艾宾浩斯遗忘曲线，自动归档不活跃的记忆
@@ -202,6 +208,13 @@ word_map:
   stopwords: []                       # Extra generic stopwords / 额外通用停用词
   private_terms: []                   # Deployment-private terms to exclude from generic Word Map
   stopword_prefixes: []               # Extra prefixes such as custom_ / 额外前缀
+  overview_stopwords: []              # Extra terms hidden from Top Nodes/Edges only; cards and recall hints are unaffected
+  overview_stopword_prefixes: []      # Extra prefixes hidden from Top Nodes/Edges only
+  overview_aliases: {}                # Display-only canonical aliases, e.g. {"darkroom": "暗房"}
+  overview_priority_terms: []         # Extra terms to boost in Top Nodes, without changing recall
+  overview_hub_terms: []              # Extra broad entity hubs to keep but lightly saturate in overview ranking
+  weak_hint_terms: []                  # Extra broad terms whose word-map hints should not one-hop expand
+  weak_hint_weight: 0.25               # Direct hint weight for weak terms; keyword recall is unaffected
 
 # --- Private identity semantics / 私有身份语义 ---
 # Optional private canonical alias overlay. Do not put personal canonical nodes
@@ -295,12 +308,12 @@ gateway:
   recalled_memory_budget: 400
   direct_render_mode: auto   # auto | compact | full; direct/recalled display shape
   retrieval_mode: graph       # graph | bucket; bucket skips moment graph diffusion
-  portrait_memory_enabled: true  # read-only stable portrait cache from profile_fact + selected anchor
+  portrait_memory_enabled: true  # read-only stable portrait cache from profile_fact by default
   portrait_memory_budget: 360
   portrait_memory_max_sources: 8
-  portrait_memory_include_anchors: true # false = profile_fact only; never includes pinned/protected by default
+  portrait_memory_include_anchors: false # true optionally adds ordinary anchors; never includes pinned/protected/self_anchor
   query_planner_enabled: true  # extra LLM call: split long/low-confidence messages into short recall queries
-  query_planner_model: ""      # empty = gateway upstream_default_model
+  query_planner_model: ""      # empty = use dehydration.model via dehydration API
   query_planner_min_chars: 16  # also catches short emotional reason lookups like "今天为什么激动哭"
   query_planner_max_queries: 3
   query_planner_max_tokens: 360
@@ -316,6 +329,11 @@ gateway:
   current_inner_state_interval_rounds: 15
   relationship_weather_interval_rounds: 0
   favorite_memory_interval_rounds: 0
+  word_map_hint_enabled: false       # true lets derived Word Map add weak recall candidates; still gated by RecallPolicy
+  word_map_hint_weight: 0.08         # weak bucket-score contribution, not a reliable evidence signal
+  word_map_hint_moment_boost: 0.25   # weak moment-search boost for hinted buckets in graph retrieval mode
+  word_map_hint_neighbor_limit: 6
+  word_map_hint_bucket_limit: 12
   semantic_weight: 0.45
   keyword_weight: 0.35
   importance_weight: 0.10
@@ -534,7 +552,8 @@ portrait:
   # api_key: ""                     # OMBRE_PORTRAIT_API_KEY overrides
   thinking_mode: ""
   temperature: 0.1
-  max_tokens: 1800
+  max_tokens: 3200
+  json_response_format: true
   material_limit: 18
   first_run_material_limit: 160
   source_excerpt_chars: 900

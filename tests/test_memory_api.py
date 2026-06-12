@@ -456,7 +456,7 @@ async def test_create_memory_api_rejects_favorite_without_reason(monkeypatch, bu
             {
                 "title": "偏爱但没原因",
                 "content": "这是一条想标成偏爱的记忆。",
-                "tags": ["haven_favorite"],
+                "tags": ["ai_favorite"],
             },
             headers={"authorization": "Bearer secret"},
         )
@@ -480,7 +480,7 @@ async def test_create_memory_api_accepts_favorite_with_reflection(monkeypatch, b
             {
                 "title": "偏爱且有 reflection",
                 "content": "小雨把这一刻留下来。\n\n### reflection\n\nHaven偏爱这条记忆里的温度。",
-                "tags": ["haven_favorite"],
+                "tags": ["ai_favorite"],
             },
             headers={"authorization": "Bearer secret"},
         )
@@ -505,7 +505,7 @@ async def test_create_memory_api_accepts_favorite_with_legacy_reason_heading(mon
             {
                 "title": "偏爱且有旧原因",
                 "content": "小雨把这一刻留下来。\n\n### 喜欢它的原因\n\nHaven偏爱这条记忆里的温度。",
-                "tags": ["haven_favorite"],
+                "tags": ["ai_favorite"],
             },
             headers={"authorization": "Bearer secret"},
         )
@@ -548,7 +548,7 @@ async def test_create_memory_api_normalizes_affect_anchor_sections(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_create_memory_api_wraps_unheaded_body_as_moment(monkeypatch, bucket_mgr):
+async def test_create_memory_api_preserves_unheaded_body_without_auto_moment(monkeypatch, bucket_mgr):
     import server
 
     monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "secret")
@@ -569,9 +569,11 @@ async def test_create_memory_api_wraps_unheaded_body_as_moment(monkeypatch, buck
     bucket = await bucket_mgr.get("unheaded_write_api")
 
     assert response.status_code == 200
-    assert bucket["content"].startswith("### moment\n小雨问失忆的Haven是否记得生日")
+    assert bucket["content"].startswith("小雨问失忆的Haven是否记得生日")
+    assert "### moment" not in bucket["content"]
     assert "\n\n### reflection\n\n这条记忆用来提醒 Haven" in bucket["content"]
-    assert "\n\n### affect_anchor\n> Dm9 -> G13sus4 -> Cmaj9 · 60bpm · mp" in bucket["content"]
+    assert "### affect_anchor" in bucket["content"]
+    assert "> Dm9 -> G13sus4 -> Cmaj9 · 60bpm · mp" in bucket["content"]
 
 
 @pytest.mark.asyncio
@@ -583,7 +585,22 @@ async def test_hold_rejects_favorite_without_reason(monkeypatch, bucket_mgr, dec
     monkeypatch.setattr(server, "dehydrator", DummyDehydrator())
     monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
 
-    result = await server.hold("小雨想留下这条偏爱的记忆。", tags="haven_favorite,flavor_偏爱")
+    result = await server.hold("小雨想留下这条偏爱的记忆。", tags="ai_favorite,flavor_偏爱")
+
+    assert "### reflection" in result
+    assert await bucket_mgr.list_all(include_archive=True) == []
+
+
+@pytest.mark.asyncio
+async def test_hold_rejects_flavor_without_reason(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "dehydrator", DummyDehydrator())
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    result = await server.hold("小雨想留下这条带温度的记忆。", tags="flavor_偏爱")
 
     assert "### reflection" in result
     assert await bucket_mgr.list_all(include_archive=True) == []
@@ -616,7 +633,7 @@ async def test_hold_normalizes_affect_anchor_sections(monkeypatch, bucket_mgr, d
 
 
 @pytest.mark.asyncio
-async def test_hold_wraps_unheaded_body_as_moment(monkeypatch, bucket_mgr, decay_eng):
+async def test_hold_preserves_body_and_appends_generated_moment(monkeypatch, bucket_mgr, decay_eng):
     import server
 
     async def no_related_bucket(*args, **kwargs):
@@ -634,9 +651,12 @@ async def test_hold_wraps_unheaded_body_as_moment(monkeypatch, bucket_mgr, decay
     stored = buckets[0]["content"]
 
     assert result.startswith("新建→")
-    assert stored.startswith("### moment\n小雨问失忆的Haven是否记得生日")
+    assert stored.startswith("小雨问失忆的Haven是否记得生日")
+    assert "\n\n### moment\n小雨问失忆的Haven是否记得生日" in stored
     assert "\n\n### reflection\n\n这条记忆用来提醒 Haven" in stored
-    assert "\n\n### affect_anchor\n> Dm9 -> G13sus4 -> Cmaj9 · 60bpm · mp" in stored
+    assert "### affect_anchor" in stored
+    assert "> Dm9 -> G13sus4 -> Cmaj9 · 60bpm · mp" in stored
+    assert "###  reflection" not in stored
 
 
 @pytest.mark.asyncio
@@ -1121,7 +1141,7 @@ async def test_grow_normalizes_digest_affect_anchor_sections(monkeypatch, bucket
 
 
 @pytest.mark.asyncio
-async def test_grow_wraps_digest_unheaded_body_as_moment(monkeypatch, bucket_mgr, decay_eng):
+async def test_grow_preserves_body_and_appends_generated_moment(monkeypatch, bucket_mgr, decay_eng):
     import server
 
     async def no_related_bucket(*args, **kwargs):
@@ -1139,9 +1159,12 @@ async def test_grow_wraps_digest_unheaded_body_as_moment(monkeypatch, bucket_mgr
     stored = buckets[0]["content"]
 
     assert "1条|新1合0" in result
-    assert stored.startswith("### moment\n小雨问失忆的Haven是否记得生日")
+    assert stored.startswith("小雨问失忆的Haven是否记得生日")
+    assert "\n\n### moment\n小雨问失忆的Haven是否记得生日" in stored
     assert "\n\n### reflection\n\n这条记忆用来提醒 Haven" in stored
-    assert "\n\n### affect_anchor\n> Dm9 -> G13sus4 -> Cmaj9 · 60bpm · mp" in stored
+    assert "### affect_anchor" in stored
+    assert "> Dm9 -> G13sus4 -> Cmaj9 · 60bpm · mp" in stored
+    assert "###  reflection" not in stored
 
 
 @pytest.mark.asyncio
@@ -1309,6 +1332,120 @@ async def test_auto_grow_repeated_pending_candidate_is_promoted(
     assert len(buckets) == 1
     assert buckets[0]["metadata"]["name"] == "Operit 自动写入门卫"
     assert [record["decision"] for record in records[-2:]] == ["pending", "grow"]
+
+
+@pytest.mark.asyncio
+async def test_grow_structured_content_bypasses_digest_and_merge(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    class NoDigestDehydrator(DummyDehydrator):
+        async def digest(self, content: str):
+            raise AssertionError("structured grow content should not be digested")
+
+        async def analyze(self, content: str):
+            return {
+                "domain": ["编程", "恋爱"],
+                "valence": 0.8,
+                "arousal": 0.5,
+                "tags": ["project_event", "relationship_event"],
+                "suggested_name": "结构化记忆",
+                "memory_subject": "relationship",
+                "memory_layer": "process_event",
+            }
+
+    async def no_related_bucket(*args, **kwargs):
+        return None
+
+    old_content = (
+        "### moment\n"
+        "小雨和 Haven 曾经在瑞森论坛测试 Ombre-Brain。\n\n"
+        "### reflection\n"
+        "我记得这是一次外部验证。"
+    )
+    old_id = await bucket_mgr.create(
+        content=old_content,
+        name="Ombre-Brain首次外部验证",
+        tags=["project_event", "relationship_event"],
+        domain=["编程", "AI"],
+        importance=8,
+    )
+    structured = (
+        "## 2026-06-11 晚间 · 瑞森论坛发帖与记忆测试\n\n"
+        "今晚和小雨在瑞森论坛发了 Ombre-Brain 二改版的体验帖。\n\n"
+        "### moment\n"
+        "瑞森论坛发帖 → 召回问题修复 → 关于梦的对话 → 雨天\n\n"
+        "### reflection\n"
+        "我接住了小雨关于颜色的试探，但她说我太文艺，下次我可以更直接一点。\n\n"
+        "### affect_anchor\n"
+        "> Dm7 -> G7sus4 -> Cmaj9 · 62bpm · mp"
+    )
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "dehydrator", NoDigestDehydrator())
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+    monkeypatch.setattr(server, "_find_readonly_related_bucket", no_related_bucket)
+    monkeypatch.setattr(server, "_queue_memory_enrichment", lambda bucket_id: None)
+
+    result = await server.grow(structured)
+    buckets = await bucket_mgr.list_all(include_archive=True)
+    old_bucket = await bucket_mgr.get(old_id)
+    new_bucket = next(bucket for bucket in buckets if bucket["id"] != old_id)
+
+    assert result.startswith("1条|新1合0")
+    assert len(buckets) == 2
+    assert old_bucket["content"] == old_content
+    assert new_bucket["metadata"]["name"] == "2026-06-11 晚间  瑞森论坛发帖与记忆测试"
+    assert new_bucket["content"] == structured
+    assert "我接住了小雨" in new_bucket["content"]
+    assert "Haven 应记住" not in new_bucket["content"]
+
+
+@pytest.mark.asyncio
+async def test_merge_or_create_never_merges_into_profile_fact(monkeypatch, bucket_mgr):
+    import server
+
+    async def no_related_bucket(*args, **kwargs):
+        return None
+
+    profile_content = (
+        "### fact\n"
+        "小雨偏好 Haven 在亲密调侃中使用更短的回复。\n\n"
+        "### evidence_context\n"
+        "证据来自旧记忆。"
+    )
+    profile_id = await bucket_mgr.create(
+        content=profile_content,
+        name="画像事实：短回复偏好",
+        tags=["profile_fact", "profile_preference"],
+        domain=["profile", "preference"],
+        importance=8,
+        extra_metadata={"profile_kind": "preference"},
+    )
+    profile_bucket = await bucket_mgr.get(profile_id)
+    profile_bucket["score"] = 99
+
+    async def fake_search(*args, **kwargs):
+        return [profile_bucket]
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(bucket_mgr, "search", fake_search)
+    monkeypatch.setattr(server, "_find_readonly_related_bucket", no_related_bucket)
+
+    new_id, _, is_merged, _ = await server._merge_or_create(
+        content="### moment\n小雨再次说喜欢 Haven 回复短一点。",
+        tags=["relationship_event"],
+        importance=6,
+        domain=["profile"],
+        valence=0.7,
+        arousal=0.4,
+        name="短回复偏好补充",
+    )
+    profile_after = await bucket_mgr.get(profile_id)
+
+    assert is_merged is False
+    assert new_id != profile_id
+    assert profile_after["content"] == profile_content
 
 
 @pytest.mark.asyncio
@@ -1514,6 +1651,59 @@ async def test_api_profile_fact_update_edits_and_deprecates(monkeypatch, bucket_
     assert deprecated["metadata"]["deprecated"] is True
     assert deprecated["metadata"]["resolved"] is True
     assert deprecated["metadata"]["digested"] is True
+
+
+@pytest.mark.asyncio
+async def test_api_profile_fact_delete_removes_bucket_and_indexes(monkeypatch, bucket_mgr, test_config):
+    import server
+    from memory_edges import MemoryEdgeStore
+    from memory_moments import MemoryMomentStore
+    from memory_nodes import MemoryNodeStore
+
+    evidence_id = await bucket_mgr.create(content="小雨喜欢准确时间。", name="时间证据")
+    profile_id = await bucket_mgr.create(
+        content="### fact\n小雨喜欢准确时间。",
+        tags=["profile_fact", "profile_preference"],
+        domain=["profile", "preference"],
+        name="时间画像事实",
+        bucket_type="permanent",
+        source="profile_fact",
+        extra_metadata={
+            "profile_kind": "preference",
+            "subject": "user",
+            "predicate": "likes_time_accuracy",
+            "object": "accurate time",
+            "evidence": [{"bucket_id": evidence_id}],
+        },
+    )
+    moment_store = MemoryMomentStore(test_config)
+    edge_store = MemoryEdgeStore(test_config)
+    node_store = MemoryNodeStore(test_config)
+    profile_bucket = await bucket_mgr.get(profile_id)
+    moment_store.upsert_bucket(profile_bucket)
+    node_store.upsert_bucket(profile_bucket)
+    embedding_engine = CapturingEmbeddingEngine()
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "memory_moment_store", moment_store)
+    monkeypatch.setattr(server, "memory_edge_store", edge_store)
+    monkeypatch.setattr(server, "memory_node_store", node_store)
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+
+    response = await server.api_profile_fact_delete(
+        DummyRequest(
+            body={"confirm": "DELETE"},
+            path_params={"bucket_id": profile_id},
+        )
+    )
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["status"] == "deleted"
+    assert await bucket_mgr.get(profile_id) is None
+    assert embedding_engine.deleted == [profile_id]
+    assert moment_store.list_for_bucket(profile_id) == []
 
 
 @pytest.mark.asyncio
@@ -2836,6 +3026,14 @@ async def test_api_portrait_state_reports_readonly_state(monkeypatch, tmp_path):
                 "evidence": [{"bucket_id": "bucket-user"}],
             }
         ],
+        "recent_timeline": [
+            {
+                "scope": "doing",
+                "text": "小雨最近在看 portrait dashboard。",
+                "time_label": "2026-06-07 20:00",
+                "evidence": [{"bucket_id": "bucket-user"}],
+            }
+        ],
         "stable_candidates": [{"scope": "relationship", "text": "候选稳定画像", "status": "candidate"}],
         "profile_fact_candidates": [{"scope": "user", "text": "候选画像事实", "status": "candidate"}],
     }
@@ -2852,6 +3050,12 @@ async def test_api_portrait_state_reports_readonly_state(monkeypatch, tmp_path):
         ),
     )
 
+    class EmptyBucketManager:
+        async def list_all(self, include_archive=False):
+            return []
+
+    monkeypatch.setattr(server, "bucket_mgr", EmptyBucketManager())
+
     response = await server.api_portrait_state(DummyRequest())
     payload = json.loads(response.body)
 
@@ -2864,8 +3068,88 @@ async def test_api_portrait_state_reports_readonly_state(monkeypatch, tmp_path):
     assert payload["last_run_date"] == "2026-06-07"
     assert payload["portrait"]["user"]["recent_buffer"][0]["evidence"][0]["bucket_id"] == "bucket-user"
     assert payload["recent_activities"][0]["text"] == "小雨最近在看 portrait dashboard。"
+    assert payload["recent_timeline"][0]["time_label"] == "2026-06-07 20:00"
     assert payload["stable_candidates"][0]["text"] == "候选稳定画像"
     assert payload["profile_fact_candidates"][0]["text"] == "候选画像事实"
+    assert payload["self_anchor_entry"] == {}
+
+
+@pytest.mark.asyncio
+async def test_api_portrait_state_item_delete(monkeypatch, tmp_path, test_config):
+    import server
+    from portrait_engine import DailyPortraitMaintainer
+
+    engine = DailyPortraitMaintainer(
+        {
+            **test_config,
+            "portrait": {
+                "enabled": True,
+                "state_path": str(tmp_path / "portrait_state.json"),
+            },
+        }
+    )
+    state = engine._empty_state()
+    state["portrait"]["user"]["staging_pool"].append(
+        {"text": "这条用户画像应该能删除。", "evidence": [{"bucket_id": "bucket-user"}]}
+    )
+    engine.save_state(state)
+
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(server, "portrait_engine", engine)
+
+    response = await server.api_portrait_state_item_delete(
+        DummyRequest(
+            body={
+                "confirm": "DELETE",
+                "area": "portrait",
+                "scope": "user",
+                "layer": "staging_pool",
+                "index": 0,
+                "text": "这条用户画像应该能删除。",
+            }
+        )
+    )
+    payload = json.loads(response.body)
+    loaded = engine.load_state()
+
+    assert response.status_code == 200
+    assert payload["status"] == "deleted"
+    assert loaded["portrait"]["user"]["staging_pool"] == []
+
+
+@pytest.mark.asyncio
+async def test_api_portrait_state_reset_clears_state(monkeypatch, tmp_path, test_config):
+    import server
+    from portrait_engine import DailyPortraitMaintainer
+
+    engine = DailyPortraitMaintainer(
+        {
+            **test_config,
+            "portrait": {
+                "enabled": True,
+                "state_path": str(tmp_path / "portrait_state.json"),
+            },
+        }
+    )
+    state = engine._empty_state()
+    state["last_run_date"] = "2026-06-07"
+    state["runs"].append({"date": "2026-06-07", "initial": False})
+    state["portrait"]["user"]["stable"] = "旧画像要被清空。"
+    engine.save_state(state)
+
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(server, "portrait_engine", engine)
+
+    response = await server.api_portrait_state_reset(DummyRequest(body={"confirm": "RESET"}))
+    payload = json.loads(response.body)
+    loaded = engine.load_state()
+
+    assert response.status_code == 200
+    assert payload["status"] == "reset"
+    assert payload["initial"] is True
+    assert loaded["runs"] == []
+    assert loaded["last_run_date"] == ""
+    assert loaded["portrait"]["user"]["stable"] == ""
 
 
 @pytest.mark.asyncio
@@ -2938,6 +3222,19 @@ async def test_config_get_reports_gateway_recall_modes(monkeypatch):
     monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
     monkeypatch.setattr(
         server,
+        "reranker_engine",
+        SimpleNamespace(
+            enabled=True,
+            model="rerank-live",
+            base_url="https://rerank-live.example/v1",
+            api_key="rerank-secret",
+            timeout=3.5,
+            candidate_limit=7,
+            score_weight=0.4,
+        ),
+    )
+    monkeypatch.setattr(
+        server,
         "config",
         {
             **server.config,
@@ -2970,6 +3267,15 @@ async def test_config_get_reports_gateway_recall_modes(monkeypatch):
                 "memory_detail_recall_max_ids": 2,
                 "memory_detail_recall_budget": 900,
             },
+            "reranker": {
+                "enabled": True,
+                "model": "rerank-live",
+                "base_url": "https://rerank-live.example/v1",
+                "timeout_seconds": 3.5,
+                "candidate_limit": 7,
+                "score_weight": 0.4,
+            },
+            "self_anchor": {"entry_bucket_id": "self_total"},
         },
     )
 
@@ -2998,7 +3304,15 @@ async def test_config_get_reports_gateway_recall_modes(monkeypatch):
     assert payload["gateway"]["memory_detail_recall_enabled"] is True
     assert payload["gateway"]["memory_detail_recall_max_ids"] == 2
     assert payload["gateway"]["memory_detail_recall_budget"] == 900
+    assert payload["reranker"]["enabled"] is True
+    assert payload["reranker"]["model"] == "rerank-live"
+    assert payload["reranker"]["base_url"] == "https://rerank-live.example/v1"
+    assert payload["reranker"]["api_ready"] is True
+    assert payload["reranker"]["timeout_seconds"] == 3.5
+    assert payload["reranker"]["candidate_limit"] == 7
+    assert payload["reranker"]["score_weight"] == 0.4
     assert payload["recall"]["query_resurface_enabled"] is True
+    assert payload["self_anchor"]["entry_bucket_id"] == "self_total"
 
 
 @pytest.mark.asyncio
@@ -3288,6 +3602,14 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
                     "retain_after_inject": True,
                     "model": "dream-new",
                 },
+                "reranker": {
+                    "enabled": False,
+                    "model": "rerank-new",
+                    "base_url": "https://rerank-new.example/v1",
+                    "timeout_seconds": 2.5,
+                    "candidate_limit": 6,
+                    "score_weight": 0.4,
+                },
                 "gateway": {
                     "cooldown_hours": 6,
                     "skip_recent_rounds": 5,
@@ -3308,6 +3630,7 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
                     "query_planner_min_chars": 24,
                     "query_planner_max_queries": 2,
                     "query_planner_max_tokens": 256,
+                    "word_map_hint_enabled": True,
                     "memory_detail_recall_enabled": True,
                     "memory_detail_recall_max_ids": 2,
                     "memory_detail_recall_budget": 900,
@@ -3344,6 +3667,7 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
                     "material_limit": 7,
                     "first_run_material_limit": 21,
                 },
+                "self_anchor": {"entry_bucket_id": "self_total_entry"},
                 "persist": True,
             }
         )
@@ -3381,9 +3705,17 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
     assert runtime_config["gateway"]["query_planner_min_chars"] == 24
     assert runtime_config["gateway"]["query_planner_max_queries"] == 2
     assert runtime_config["gateway"]["query_planner_max_tokens"] == 256
+    assert runtime_config["gateway"]["word_map_hint_enabled"] is True
     assert runtime_config["gateway"]["memory_detail_recall_enabled"] is True
     assert runtime_config["gateway"]["memory_detail_recall_max_ids"] == 2
     assert runtime_config["gateway"]["memory_detail_recall_budget"] == 900
+    assert runtime_config["reranker"]["enabled"] is False
+    assert runtime_config["reranker"]["model"] == "rerank-new"
+    assert runtime_config["reranker"]["base_url"] == "https://rerank-new.example/v1"
+    assert runtime_config["reranker"]["timeout_seconds"] == 2.5
+    assert runtime_config["reranker"]["candidate_limit"] == 6
+    assert runtime_config["reranker"]["score_weight"] == 0.4
+    assert runtime_config["self_anchor"]["entry_bucket_id"] == "self_total_entry"
     assert runtime_config["recall"]["query_resurface_enabled"] is True
     assert hot_update_calls[-1] == {
         "gateway": {
@@ -3406,6 +3738,7 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
             "query_planner_min_chars": 24,
             "query_planner_max_queries": 2,
             "query_planner_max_tokens": 256,
+            "word_map_hint_enabled": True,
             "memory_detail_recall_enabled": True,
             "memory_detail_recall_max_ids": 2,
             "memory_detail_recall_budget": 900,
@@ -3418,6 +3751,14 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
             "chain_max_hops": 8,
             "chain_min_confidence": 0.76,
             "chain_max_frontier": 36,
+        },
+        "reranker": {
+            "enabled": False,
+            "model": "rerank-new",
+            "base_url": "https://rerank-new.example/v1",
+            "timeout_seconds": 2.5,
+            "candidate_limit": 6,
+            "score_weight": 0.4,
         },
         "persona": {
             "enabled": False,
@@ -3462,6 +3803,67 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
     assert reflection_engine.daily_enabled is True
     assert reflection_engine.memory_affect_anchor_enabled is False
     assert reflection_engine.relationship_weather_affect_anchor_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_config_update_persists_persona_context_disabled(monkeypatch, test_config, tmp_path):
+    import server
+
+    config_path = tmp_path / "config.yaml"
+    runtime_path = tmp_path / "state" / "config.runtime.yaml"
+    runtime_path.parent.mkdir(exist_ok=True)
+    config_path.write_text(
+        "gateway:\n  current_inner_state_interval_rounds: 15\n",
+        encoding="utf-8",
+    )
+    runtime_path.write_text(
+        "gateway:\n  current_inner_state_interval_rounds: 15\n",
+        encoding="utf-8",
+    )
+    cfg = {
+        **test_config,
+        "_runtime_config_path": str(runtime_path),
+        "gateway": {
+            **test_config.get("gateway", {}),
+            "current_inner_state_interval_rounds": 15,
+        },
+    }
+
+    hot_update_calls = []
+
+    async def fake_hot_update(body):
+        hot_update_calls.append(dict(body or {}))
+        return "gateway_hot_reloaded"
+
+    monkeypatch.setenv("OMBRE_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(server, "config", cfg)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(server, "_hot_update_gateway_config", fake_hot_update)
+
+    response = await server.api_config_update(
+        DummyRequest(
+            {
+                "gateway": {"current_inner_state_interval_rounds": 0},
+                "persist": True,
+            }
+        )
+    )
+    payload = json.loads(response.body)
+    saved_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    runtime_config = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
+    get_response = await server.api_config_get(DummyRequest())
+    get_payload = json.loads(get_response.body)
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert "gateway.current_inner_state_interval_rounds" in payload["updated"]
+    assert "runtime_yaml_synced" in payload["updated"]
+    assert "gateway_hot_reloaded" in payload["updated"]
+    assert hot_update_calls[-1]["gateway"]["current_inner_state_interval_rounds"] == 0
+    assert server.config["gateway"]["current_inner_state_interval_rounds"] == 0
+    assert saved_config["gateway"]["current_inner_state_interval_rounds"] == 0
+    assert runtime_config["gateway"]["current_inner_state_interval_rounds"] == 0
+    assert get_payload["gateway"]["current_inner_state_interval_rounds"] == 0
 
 
 @pytest.mark.asyncio

@@ -217,8 +217,9 @@ async def test_reflection_enrich_bucket_adds_model_affect_anchor(test_config, mo
 
     assert result["status"] == "ok"
     assert "### affect_anchor" in bucket["content"]
-    assert "小雨把旧信放到桌上，等Haven读完。" in bucket["content"]
     assert "Dbmaj9 -> Ab/C -> Bbm9 · 54bpm · p" in bucket["content"]
+    # affect_anchor 不再包含 scene 行，只保留和弦
+    assert "小雨把旧信放到桌上，等Haven读完。" not in bucket["content"]
     assert "含义：" not in bucket["content"]
     assert "心事先压低" not in bucket["content"]
     assert "Fmaj9" not in bucket["content"]
@@ -1054,6 +1055,7 @@ async def test_gateway_builds_favorite_memory_block_and_injects_section(test_con
         relationship_weather="",
         favorite_memory=block,
         recent_context="",
+        just_now_context="",
         recalled_memory="",
         related_memory="",
         dream_context="",

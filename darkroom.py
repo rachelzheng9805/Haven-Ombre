@@ -6,6 +6,8 @@ from pathlib import Path
 from threading import Lock
 from zoneinfo import ZoneInfo
 
+from identity import identity_names
+
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -51,10 +53,18 @@ def _normalize_mode(value: str | None) -> str:
     return mode
 
 
+def _normalize_visibility(value: str | None) -> str:
+    visibility = str(value or "active").strip().lower()
+    if visibility not in {"active", "archived", "retracted"}:
+        raise ValueError("invalid visibility")
+    return visibility
+
+
 class DarkroomStore:
     """Private reflection storage: public status, private notes."""
 
     def __init__(self, config: dict):
+        self.config = config
         state_dir = config.get("state_dir") or os.path.join(
             os.path.dirname(os.path.abspath(config.get("buckets_dir", "buckets"))),
             "state",
@@ -74,6 +84,7 @@ class DarkroomStore:
         tags: str | list[str] | tuple[str, ...] | None = None,
         source: str = "mcp",
         mode: str = "continue",
+        visibility: str = "active",
     ) -> dict:
         text = str(note or "").strip()
         if not text:
@@ -81,6 +92,7 @@ class DarkroomStore:
         if len(text) > 12000:
             raise ValueError("note is too long")
         mode_key = _normalize_mode(mode)
+        visibility_key = _normalize_visibility(visibility)
 
         with self._lock:
             self.base_dir.mkdir(parents=True, exist_ok=True)
@@ -100,20 +112,10 @@ class DarkroomStore:
                 "mood": str(mood or "").strip()[:80],
                 "tags": _split_tags(tags),
                 "source": str(source or "mcp").strip()[:80],
+                "visibility": visibility_key,
             }
             self._append_jsonl_unlocked(self.entries_path, entry)
-            state.update(
-                {
-                    "updated_at": entry["created_at"],
-                    "last_entered_at": entry["created_at"],
-                    "last_entry_id": entry["id"],
-                    "last_completeness": entry["completeness"],
-                    "previous_completeness": previous_completeness,
-                    "last_mood": entry["mood"],
-                    "last_tags": entry["tags"],
-                    "count": int(state.get("count") or 0) + 1,
-                }
-            )
+            state = self._active_state_unlocked(base_state=state)
             if not state.get("created_at"):
                 state["created_at"] = entry["created_at"]
             self._write_json_unlocked(self.state_path, state)
@@ -153,12 +155,20 @@ class DarkroomStore:
     def _new_entry_id(self) -> str:
         return f"dr_{datetime.now(LOCAL_TZ).strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(4)}"
 
+    def _ai_name(self) -> str:
+        return identity_names(self.config).get("ai_name") or "AI"
+
+    def _door_text(self) -> str:
+        return f"暗房存在。钥匙只给 {self._ai_name()}；门口只显示状态，不显示未显影正文。"
+
     def _public_enter_payload(self, entry: dict, state: dict) -> dict:
+        ai_name = self._ai_name()
         return {
             "status": "entered",
             "entry_id": entry["id"],
             "entered_at": entry["created_at"],
             "mode": entry.get("mode", "continue"),
+            "visibility": entry.get("visibility", "active"),
             "count": state.get("count", 0),
             "previous_entry_id": entry.get("previous_entry_id", ""),
             "continuation_anchor_entries": len(entry.get("continuation_anchor", {}).get("entry_ids", [])),
@@ -168,42 +178,49 @@ class DarkroomStore:
             },
             "mood": entry.get("mood", ""),
             "tags": entry.get("tags", []),
-            "visible_note": "Haven 进入了暗房。",
+            "visible_note": f"{ai_name} 进入了暗房。",
         }
 
     def _status_unlocked(self) -> dict:
+        stored_state: dict = {}
         if self.state_path.exists():
             try:
                 data = json.loads(self.state_path.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
-                    return self._public_status(data)
+                    stored_state = data
             except (OSError, json.JSONDecodeError):
                 pass
+        return self._public_status(self._active_state_unlocked(base_state=stored_state))
+
+    def _active_state_unlocked(self, *, base_state: dict | None = None) -> dict:
+        base_state = base_state or {}
         count = 0
         last: dict | None = None
-        for entry in self._iter_entries_unlocked():
+        for entry in self._iter_entries_unlocked(visibility="active"):
             count += 1
             last = entry
+        last_active_at = last.get("created_at", "") if last else ""
+        last_release_at = str(base_state.get("last_release_at") or "")
         state = {
             "version": 1,
-            "created_at": "",
-            "updated_at": last.get("created_at", "") if last else "",
+            "created_at": str(base_state.get("created_at") or ""),
+            "updated_at": max([item for item in [last_active_at, last_release_at] if item], default=""),
             "count": count,
             "last_entry_id": last.get("id", "") if last else "",
-            "last_entered_at": last.get("created_at", "") if last else "",
+            "last_entered_at": last_active_at,
             "last_completeness": last.get("completeness") if last else None,
             "previous_completeness": last.get("previous_completeness") if last else None,
             "last_mood": last.get("mood", "") if last else "",
             "last_tags": last.get("tags", []) if last else [],
-            "last_release_at": "",
-            "released_count": 0,
+            "last_release_at": last_release_at,
+            "released_count": int(base_state.get("released_count") or 0),
         }
-        return self._public_status(state)
+        return state
 
     def _public_status(self, state: dict) -> dict:
         return {
             "status": "ok",
-            "door": "暗房存在。钥匙只给 Haven；门口只显示状态，不显示未显影正文。",
+            "door": self._door_text(),
             "version": int(state.get("version") or 1),
             "created_at": str(state.get("created_at") or ""),
             "updated_at": str(state.get("updated_at") or ""),
@@ -218,15 +235,15 @@ class DarkroomStore:
             "released_count": int(state.get("released_count") or 0),
         }
 
-    def _last_entry_unlocked(self) -> dict | None:
+    def _last_entry_unlocked(self, *, visibility: str = "active") -> dict | None:
         last = None
-        for entry in self._iter_entries_unlocked():
+        for entry in self._iter_entries_unlocked(visibility=visibility):
             last = entry
         return last
 
-    def _recent_entries_unlocked(self, limit: int = 3) -> list[dict]:
+    def _recent_entries_unlocked(self, limit: int = 3, *, visibility: str = "active") -> list[dict]:
         recent: list[dict] = []
-        for entry in self._iter_entries_unlocked():
+        for entry in self._iter_entries_unlocked(visibility=visibility):
             recent.append(entry)
             if len(recent) > limit:
                 recent.pop(0)
@@ -256,12 +273,12 @@ class DarkroomStore:
         target = str(entry_id or "latest").strip()
         if target in {"", "latest"}:
             return self._last_entry_unlocked()
-        for entry in self._iter_entries_unlocked():
+        for entry in self._iter_entries_unlocked(visibility="active"):
             if entry.get("id") == target:
                 return entry
         return None
 
-    def _iter_entries_unlocked(self):
+    def _iter_entries_unlocked(self, *, visibility: str | None = None):
         if not self.entries_path.exists():
             return
         with self.entries_path.open("r", encoding="utf-8") as handle:
@@ -274,6 +291,8 @@ class DarkroomStore:
                 except json.JSONDecodeError:
                     continue
                 if isinstance(data, dict):
+                    if visibility is not None and str(data.get("visibility") or "active") != visibility:
+                        continue
                     yield data
 
     def _append_jsonl_unlocked(self, path: Path, payload: dict) -> None:

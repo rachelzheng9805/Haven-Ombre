@@ -251,7 +251,7 @@ def test_favorite_tags_and_affect_anchor_are_preserved_as_bucket_temperature():
                 "它保留了当时没有被摘要抹平的味道。",
             ]
         ),
-        tags=["haven_favorite", "flavor_偏爱", "relationship_event"],
+        tags=["ai_favorite", "flavor_偏爱", "relationship_event"],
     )
 
     moments = parse_bucket_moments(bucket)
@@ -262,7 +262,7 @@ def test_favorite_tags_and_affect_anchor_are_preserved_as_bucket_temperature():
         "favorite_reason",
     ]
     assert moments[0]["metadata"]["bucket_favorite"] is True
-    assert moments[0]["metadata"]["bucket_favorite_tags"] == ["haven_favorite", "flavor_偏爱"]
+    assert moments[0]["metadata"]["bucket_favorite_tags"] == ["ai_favorite", "flavor_偏爱"]
     assert moments[0]["metadata"]["bucket_has_affect_anchor"] is True
     assert "Dbmaj9" in moments[1]["text"]
 

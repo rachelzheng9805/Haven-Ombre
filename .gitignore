@@ -12,6 +12,7 @@ connection_guide.txt
 start_mobile.sh
 buckets/
 state/
+output/
 *.log
 server.log
 plan.md
@@ -19,3 +20,4 @@ scarp_paper
 backup_*/
 *.db
 import_state.json
+.codex

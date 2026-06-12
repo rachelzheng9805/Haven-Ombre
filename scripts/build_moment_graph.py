@@ -42,6 +42,7 @@ WEAK_TERMS = {
     "digested",
     "archive",
     "favorite",
+    "ai_favorite",
     "haven_favorite",
     "记忆",
     "回忆",
@@ -60,6 +61,7 @@ WEAK_TERMS = {
     "status",
 }
 WEAK_TERM_PREFIXES = ("flavor_",)
+WEAK_TERM_SUFFIXES = ("_favorite",)
 WEAK_GRAPH_FACETS = {"old_or_resolved"}
 CONTEXT_GLUE_TERMS = {
     "与",
@@ -489,6 +491,8 @@ def keep_term(value: Any) -> bool:
         return False
     if any(term.startswith(prefix) for prefix in WEAK_TERM_PREFIXES):
         return False
+    if any(term.endswith(suffix) for suffix in WEAK_TERM_SUFFIXES):
+        return False
     if not re.search(r"[a-zA-Z\u4e00-\u9fff]", term):
         return False
     if re.fullmatch(r"0x[0-9a-f]+", term):
@@ -509,6 +513,8 @@ def keep_metadata_term(value: Any) -> bool:
     if term in WEAK_TERMS:
         return False
     if any(term.startswith(prefix) for prefix in WEAK_TERM_PREFIXES):
+        return False
+    if any(term.endswith(suffix) for suffix in WEAK_TERM_SUFFIXES):
         return False
     return True
 

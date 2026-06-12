@@ -167,7 +167,7 @@ def test_dashboard_exposes_profile_fact_page():
 def test_dashboard_exposes_portrait_state_panel():
     html = Path("dashboard.html").read_text(encoding="utf-8")
     profile_tab_block = html.split("if (target === 'profile')", 1)[1].split("if (target === 'word-map')", 1)[0]
-    load_buckets_block = html.split("async function loadBuckets()", 1)[1].split("function getActiveTab()", 1)[0]
+    load_buckets_block = html.split("async function loadBuckets", 1)[1].split("function getActiveTab()", 1)[0]
 
     assert 'id="portrait-state-panel"' in html
     assert 'id="portrait-state-summary"' in html
@@ -176,23 +176,55 @@ def test_dashboard_exposes_portrait_state_panel():
     assert "Portrait State" in html
     assert "只读，不写 profile_fact、anchor 或 Core Memory" in html
     assert "loadPortraitState()" in html
+    assert "refreshPortraitView()" in html
     assert "runPortraitMaintain" in html
+    assert "resetPortraitState" in html
+    assert "Recent Timeline" in html
+    assert "renderPortraitSelfAnchor" in html
+    assert "自我总入口" in html
+    assert "loadBuckets({ skipProfileRefresh: true });" in html
+    assert "var deleteSpec = item._delete ? escAttr(jsString(JSON.stringify(item._delete))) : '';" in html
     assert "renderPortraitState" in html
     assert "renderPortraitScope" in html
     assert "renderPortraitCandidates" in html
     assert "renderPortraitEvidence" in html
     assert "BASE + '/api/portrait-state'" in html
     assert "BASE + '/api/portrait-maintain'" in html
+    assert "BASE + '/api/portrait-state/reset'" in html
     assert "body: JSON.stringify({ force: true })" in html
+    assert "body: JSON.stringify({ confirm: 'RESET' })" in html
     assert "read only" in html
     assert "手动生成" in html
+    assert "清空画像" in html
+    assert "state.recent_timeline" in html
     assert "state.stable_candidates" in html
     assert "state.profile_fact_candidates" in html
+    assert "state.self_anchor_entry" in html
+    assert "renderPortraitSelfAnchor(state.self_anchor_entry)" in html
+    assert "cfg-self-anchor-entry" in html
+    assert "renderPortraitScope('persona'" not in html
     assert ".portrait-state-grid" in html
     assert ".portrait-candidate-grid" in html
     assert "loadPortraitState();" in profile_tab_block
     assert "loadProfileFacts();" in profile_tab_block
     assert "loadPortraitState();" in load_buckets_block
+
+
+def test_dashboard_keeps_self_anchor_and_profile_domain_filter():
+    html = Path("dashboard.html").read_text(encoding="utf-8")
+    build_block = html.split("function buildFilters()", 1)[1].split("function filterBuckets", 1)[0]
+    filter_block = html.split("function filterBuckets", 1)[1].split("function bucketBulkDeleteBlockReason", 1)[0]
+
+    assert "function isSelfAnchorBucket" in html
+    assert "tag:self_anchor" in build_block
+    assert "label: '自我'" in build_block
+    assert "const profileDomainAliases = new Set(['preference', 'project_milestone', 'relationship_anchor']);" in build_block
+    assert "key: 'profile'" not in build_block
+    assert "label: '画像'" not in build_block
+    assert "filters.onclick = function(e)" in build_block
+    assert "filters.addEventListener" not in build_block
+    assert "currentFilter === 'profile'" not in filter_block
+    assert "currentFilter === 'tag:self_anchor'" in filter_block
 
 
 def test_dashboard_hides_confirm_button_for_active_profile_facts():
@@ -257,6 +289,13 @@ def test_dashboard_exposes_gateway_memory_cooldown_settings():
     assert 'id="cfg-gateway-rounds"' in html
     assert 'id="cfg-direct-render-mode"' in html
     assert 'id="cfg-retrieval-mode"' in html
+    assert 'id="cfg-word-map-hint-enabled"' in html
+    assert 'id="cfg-query-planner-enabled"' in html
+    assert 'id="cfg-query-planner-model"' not in html
+    assert 'id="cfg-memory-detail-recall-enabled"' in html
+    assert 'id="cfg-memory-detail-recall-max-ids"' in html
+    assert 'id="cfg-memory-detail-recall-budget"' in html
+    assert "Targeted Memory Detail 不依赖这个开关" in html
     assert 'id="cfg-diffusion-enabled"' in html
     assert 'id="cfg-diffusion-topk"' in html
     assert 'id="cfg-diffusion-min"' in html
@@ -271,6 +310,12 @@ def test_dashboard_exposes_gateway_memory_cooldown_settings():
     assert "cfg.gateway.current_inner_state_interval_rounds" in html
     assert "cfg.gateway.direct_render_mode" in html
     assert "cfg.gateway.retrieval_mode" in html
+    assert "cfg.gateway.word_map_hint_enabled" in html
+    assert "cfg.gateway.query_planner_enabled" in html
+    assert "cfg.gateway.query_planner_model" not in html
+    assert "cfg.gateway.memory_detail_recall_enabled" in html
+    assert "cfg.gateway.memory_detail_recall_max_ids" in html
+    assert "cfg.gateway.memory_detail_recall_budget" in html
     assert "((cfg.gateway && cfg.gateway.recent_context_budget) ?? 300) > 0 ? 'true' : 'false'" in load_block
     assert "personaRounds > 0 ? 'true' : 'false'" in load_block
     assert "setConfigStatus" in html
@@ -283,6 +328,12 @@ def test_dashboard_exposes_gateway_memory_cooldown_settings():
     assert "current_inner_state_interval_rounds: personaContextRounds," in html
     assert "direct_render_mode: document.getElementById('cfg-direct-render-mode').value," in html
     assert "retrieval_mode: document.getElementById('cfg-retrieval-mode').value," in html
+    assert "word_map_hint_enabled: document.getElementById('cfg-word-map-hint-enabled').value === 'true'," in html
+    assert "query_planner_enabled: document.getElementById('cfg-query-planner-enabled').value === 'true'," in html
+    assert "query_planner_model: document.getElementById('cfg-query-planner-model').value," not in html
+    assert "memory_detail_recall_enabled: document.getElementById('cfg-memory-detail-recall-enabled').value === 'true'," in html
+    assert "memory_detail_recall_max_ids: numberValue('cfg-memory-detail-recall-max-ids', 3)," in html
+    assert "memory_detail_recall_budget: numberValue('cfg-memory-detail-recall-budget', 1200)," in html
     assert "candidate.memory_diffusion = {" in save_block
     assert "top_k: numberValue('cfg-diffusion-topk', 4)," in save_block
     assert "min_activation: floatValue('cfg-diffusion-min', 0.18)," in save_block
@@ -290,17 +341,21 @@ def test_dashboard_exposes_gateway_memory_cooldown_settings():
     assert "chain_min_confidence: floatValue('cfg-chain-confidence', 0.72)," in save_block
 
 
-def test_dashboard_config_save_sends_only_changed_sections():
+def test_dashboard_config_save_sends_changed_sections_and_forces_memory_panel():
     html = Path("dashboard.html").read_text(encoding="utf-8")
     load_block = html.split("async function loadConfig()", 1)[1].split("async function saveConfig", 1)[0]
     save_block = html.split("async function saveConfig", 1)[1].split("try {", 1)[0]
 
     assert "let configSnapshot = null;" in html
     assert "configSnapshot = JSON.parse(JSON.stringify(cfg || {}));" in load_block
-    assert "function addChangedSection(target, sectionName, candidate)" in save_block
+    assert "function addChangedSection(target, sectionName, candidate, force)" in save_block
+    assert "if (force) {" in save_block
     assert "var activeTarget = activeTab ? activeTab.dataset.tab : '';" in save_block
     assert "var body = {" in save_block
-    assert "if (candidate[sectionName]) addChangedSection(body, sectionName, candidate[sectionName]);" in save_block
+    assert "forceSections.gateway = true;" in save_block
+    assert "forceSections.recall = true;" in save_block
+    assert "forceSections.memory_diffusion = true;" in save_block
+    assert "addChangedSection(body, sectionName, candidate[sectionName], !!forceSections[sectionName]);" in save_block
     assert "if (!body.persona) body.persona = {};" in save_block
     assert "body.persona.api_key = personaKeyVal;" in save_block
 
@@ -324,8 +379,8 @@ def test_dashboard_exposes_reflection_affect_anchor_switches():
     assert "cfg.reflection.relationship_weather_affect_anchor_enabled" in load_block
     reflection_block = save_block.split("candidate.reflection = {", 1)[1].split("};", 1)[0]
     assert "base_url: document.getElementById('cfg-reflection-url').value," in reflection_block
-    assert "cfg-reflection-enabled" not in reflection_block
-    assert "cfg-reflection-model" not in reflection_block
+    assert "enabled: document.getElementById('cfg-reflection-enabled').value === 'true'," in reflection_block
+    assert "model: document.getElementById('cfg-reflection-model').value," in reflection_block
     assert "if (!body.reflection) body.reflection = {};" in html
     assert "body.reflection.api_key = reflectionKeyVal;" in html
 
@@ -384,7 +439,7 @@ def test_dashboard_exposes_persona_config_and_env_persist_button():
     assert "body.persona.api_key = personaKeyVal;" in html
 
 
-def test_dashboard_dream_controls_load_but_config_save_only_writes_url_and_key():
+def test_dashboard_dream_controls_load_and_save_runtime_fields():
     html = Path("dashboard.html").read_text(encoding="utf-8")
     load_block = html.split("async function loadConfig()", 1)[1].split("async function saveConfig", 1)[0]
     save_block = html.split("async function saveConfig", 1)[1].split("var keyVal =", 1)[0]
@@ -400,9 +455,10 @@ def test_dashboard_dream_controls_load_but_config_save_only_writes_url_and_key()
     assert "document.getElementById('cfg-dream-retain').value = cfg.dream.retain_after_inject ? 'true' : 'false';" in load_block
     assert "document.getElementById('cfg-dream-enabled').value = cfg.dream.enabled" not in load_block
     assert "base_url: document.getElementById('cfg-dream-url').value," in dream_lines
-    assert not any("cfg-dream-engine-enabled" in line for line in dream_lines)
-    assert not any("cfg-dream-model" in line for line in dream_lines)
-    assert not any("cfg-dream-inject" in line for line in dream_lines)
+    assert "enabled: document.getElementById('cfg-dream-engine-enabled').value === 'true'," in dream_lines
+    assert "model: document.getElementById('cfg-dream-model').value," in dream_lines
+    assert "inject_enabled: document.getElementById('cfg-dream-inject').value === 'true'," in dream_lines
+    assert "retain_after_inject: document.getElementById('cfg-dream-retain').value === 'true'," in dream_lines
 
 
 def test_dashboard_config_number_zero_values_are_preserved():

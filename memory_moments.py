@@ -8,6 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+from favorite_tags import favorite_policy_tags
 from memory_relevance import (
     MemoryRelevanceOptions,
     content_terms_for_query,
@@ -817,11 +818,7 @@ def _make_moment(
 def _bucket_metadata(meta: dict, bucket: dict) -> dict:
     tags = _list_text(meta.get("tags"))
     content = str(bucket.get("content") or "")
-    favorite_tags = [
-        tag
-        for tag in tags
-        if tag == "haven_favorite" or tag.startswith("flavor_")
-    ]
+    favorite_tags = favorite_policy_tags(tags)
     return _clean_metadata(
         {
             "bucket_name": meta.get("name") or bucket.get("name") or "",

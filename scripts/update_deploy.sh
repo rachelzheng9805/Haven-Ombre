@@ -8,6 +8,7 @@ cd "$(ombre_repo_root)"
 
 COMPOSE_FILE="$(ombre_compose_file)"
 HEALTH_URL="${HEALTH_URL:-$(ombre_default_health_url "${COMPOSE_FILE}")}"
+GATEWAY_SERVICE="${GATEWAY_SERVICE:-${OMBRE_GATEWAY_SERVICE:-ombre-gateway}}"
 
 echo "Repo: $(pwd)"
 echo "Compose: ${COMPOSE_FILE}"
@@ -26,5 +27,11 @@ fi
 
 ombre_compose -f "${COMPOSE_FILE}" ps
 ombre_wait_for_health "${HEALTH_URL}" "${HEALTH_TRIES:-30}" "${HEALTH_DELAY:-2}"
+if ombre_compose_service_exists "${COMPOSE_FILE}" "${GATEWAY_SERVICE}"; then
+  GATEWAY_HEALTH_URL="${GATEWAY_HEALTH_URL:-$(ombre_compose_service_health_url "${COMPOSE_FILE}" "${GATEWAY_SERVICE}" "8010" "http://127.0.0.1:18002/health")}"
+  ombre_wait_for_health "${GATEWAY_HEALTH_URL}" "${HEALTH_TRIES:-30}" "${HEALTH_DELAY:-2}"
+else
+  echo "Gateway service not found in compose; skip gateway health check."
+fi
 
 echo "Update done."

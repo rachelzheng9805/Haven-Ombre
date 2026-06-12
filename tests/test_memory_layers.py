@@ -131,7 +131,7 @@ def test_runtime_gate_debug_explains_injection_decisions():
 def test_manual_favorite_and_core_signals_override_writer_classification():
     favorite = _bucket(
         type="dynamic",
-        tags=["haven_favorite"],
+        tags=["ai_favorite"],
         memory_subject="user",
         memory_layer="stable_boundary",
     )
@@ -174,7 +174,7 @@ def test_context_only_sections_override_bucket_layer():
             bucket_type="dynamic",
             bucket_pinned=True,
             bucket_favorite=True,
-            bucket_favorite_tags=["haven_favorite"],
+            bucket_favorite_tags=["ai_favorite"],
         )
         assert infer_moment_layer(moment) == LAYER_AFFECT_CONTEXT
         assert policy_for_moment(moment).direct_seed_policy == DIRECT_NEVER
@@ -218,12 +218,12 @@ def test_moment_layer_uses_bucket_writer_classification_metadata():
 
 
 def test_favorite_layer_uses_separate_policy_but_content_can_still_seed():
-    bucket = _bucket(type="dynamic", tags=["haven_favorite", "flavor_soft"])
+    bucket = _bucket(type="dynamic", tags=["ai_favorite", "flavor_soft"])
     moment = _moment(
         "body",
         bucket_type="dynamic",
         bucket_favorite=True,
-        bucket_favorite_tags=["haven_favorite", "flavor_soft"],
+        bucket_favorite_tags=["ai_favorite", "flavor_soft"],
     )
 
     assert infer_bucket_layer(bucket) == LAYER_FAVORITE
@@ -231,6 +231,13 @@ def test_favorite_layer_uses_separate_policy_but_content_can_still_seed():
     assert policy_for_bucket(bucket).direct_seed_policy == DIRECT_CONTENT
     assert infer_moment_layer(moment) == LAYER_FAVORITE
     assert can_moment_be_direct_seed(moment) is True
+
+
+def test_flavor_tag_alone_is_temperature_not_favorite_layer():
+    bucket = _bucket(type="dynamic", tags=["flavor_soft"])
+
+    assert infer_bucket_layer(bucket) == LAYER_DYNAMIC
+    assert policy_for_bucket(bucket).render_policy != RENDER_FAVORITE
 
 
 def test_archive_layer_only_allows_explicit_lookup():

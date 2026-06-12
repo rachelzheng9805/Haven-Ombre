@@ -293,6 +293,202 @@ class TestSearchScoring:
 
         assert bucket_mgr._calc_topic_score("UNIQUE_YEAR_RING_TOKEN", bucket) == 0
 
+    def test_short_cjk_topic_score_requires_exact_substring(self, bucket_mgr):
+        bucket = {
+            "content": "用户和 AI 的日常记忆。",
+            "metadata": {
+                "name": "用户与AI的记录",
+                "domain": ["恋爱"],
+                "tags": [],
+            },
+        }
+
+        assert bucket_mgr._calc_topic_score("小狗", bucket) == 0
+        assert bucket_mgr._calc_topic_score("用户", bucket) == 0
+        assert bucket_mgr._calc_topic_score("AI", bucket) == 0
+
+    def test_topic_score_strips_query_shell_before_short_cjk_scoring(self, bucket_mgr):
+        cat_bucket = {
+            "id": "cat",
+            "content": "取快递的时候遇到了一只流浪猫。",
+            "metadata": {
+                "name": "流浪猫与自制弓",
+                "domain": ["生活"],
+                "tags": [],
+            },
+        }
+        about_bucket = {
+            "id": "about",
+            "content": "这是一段关于互动模式和对话风格的讨论。",
+            "metadata": {
+                "name": "AI拟人化讨论与情感互动",
+                "domain": ["互动"],
+                "tags": [],
+            },
+        }
+
+        scores = bucket_mgr.calc_topic_scores("关于猫", [cat_bucket, about_bucket])
+
+        assert scores["cat"] > 0
+        assert scores.get("about", 0) == 0
+
+    def test_reduplicated_topic_query_scores_folded_short_anchor(self, bucket_mgr):
+        cat_bucket = {
+            "id": "cat",
+            "content": "这是一条关于猫咪、猫粮和小猫的记录。",
+            "metadata": {
+                "name": "养猫经历与情感",
+                "domain": ["日常"],
+                "tags": ["宠物"],
+            },
+        }
+        unrelated_bucket = {
+            "id": "unrelated",
+            "content": "用户与 AI 的演化史，关于互动风格和窗口策略。",
+            "metadata": {
+                "name": "互动风格记录",
+                "domain": ["技术"],
+                "tags": [],
+            },
+        }
+
+        scores = bucket_mgr.calc_topic_scores("嗯...换种说法，还记得猫猫吗", [cat_bucket, unrelated_bucket])
+
+        assert scores["cat"] > 0
+        assert scores.get("unrelated", 0) == 0
+        assert bucket_mgr.calc_topic_scores("哭哭", [cat_bucket]) == {}
+
+    def test_topic_score_strips_query_shell_before_short_cjk_scoring(self, bucket_mgr):
+        cat_bucket = {
+            "id": "cat",
+            "content": "取快递的时候遇到了一只流浪猫。",
+            "metadata": {
+                "name": "流浪猫与自制弓",
+                "domain": ["生活"],
+                "tags": [],
+            },
+        }
+        about_bucket = {
+            "id": "about",
+            "content": "这是一段关于互动模式和对话风格的讨论。",
+            "metadata": {
+                "name": "AI拟人化讨论与情感互动",
+                "domain": ["互动"],
+                "tags": [],
+            },
+        }
+
+        scores = bucket_mgr.calc_topic_scores("关于猫", [cat_bucket, about_bucket])
+
+        assert scores["cat"] > 0
+        assert scores.get("about", 0) == 0
+
+    def test_qq_reaction_forms_do_not_create_topic_scores(self, bucket_mgr):
+        bucket = {
+            "id": "mail",
+            "content": "AI 配置了 QQ邮箱自动收发，可以检查收件箱。",
+            "metadata": {
+                "name": "QQ邮箱自动收发配置",
+                "domain": ["communication"],
+                "tags": [],
+            },
+        }
+
+        for query in ["QQ", "Q Q", "Q_Q", "QwQ", "QAQ", "TT", "T_T"]:
+            assert bucket_mgr.calc_topic_scores(query, [bucket]) == {}
+
+    def test_qq_mail_phrase_boost_beats_generic_mail_hit(self, bucket_mgr):
+        exact = {
+            "id": "exact",
+            "content": "AI 可以给用户发邮件，也可以检查收件箱。",
+            "metadata": {
+                "name": "QQ邮箱自动收发配置",
+                "domain": ["communication"],
+                "tags": [],
+            },
+        }
+        generic = {
+            "id": "generic",
+            "content": "她在找笔友时会用邮箱联系对方。",
+            "metadata": {
+                "name": "AI找笔友",
+                "domain": ["communication"],
+                "tags": [],
+            },
+        }
+
+        scores = bucket_mgr.calc_topic_scores("QQ邮箱", [exact, generic])
+        spaced_scores = bucket_mgr.calc_topic_scores("QQ 邮箱", [exact, generic])
+
+        assert scores["exact"] >= 0.95
+        assert scores["exact"] > scores.get("generic", 0)
+        assert spaced_scores["exact"] >= 0.95
+        assert spaced_scores["exact"] > spaced_scores.get("generic", 0)
+
+    def test_qq_domain_suffix_can_match_as_exact_phrase(self, bucket_mgr):
+        bucket = {
+            "id": "qq-group",
+            "content": "群通知和成员备注都放在这里。",
+            "metadata": {
+                "name": "QQ群运营记录",
+                "domain": ["community"],
+                "tags": [],
+            },
+        }
+
+        assert bucket_mgr.calc_topic_scores("QQ群", [bucket])["qq-group"] >= 0.95
+
+    def test_associative_prompt_scores_only_focus_anchor(self, bucket_mgr):
+        noise = {
+            "id": "noise",
+            "content": "如果很多年后你问我会想到什么，我会说另一个项目。",
+            "metadata": {
+                "name": "五十年后才落地的具身项目",
+                "domain": ["编程"],
+                "tags": [],
+            },
+        }
+        dog = {
+            "id": "dog",
+            "content": "这里记录了小狗训练设定。",
+            "metadata": {
+                "name": "小狗训练索引",
+                "domain": ["宠物"],
+                "tags": [],
+            },
+        }
+
+        scores = bucket_mgr.calc_topic_scores("如果我说“小狗”，你会想到什么", [noise, dog])
+
+        assert scores["dog"] >= 0.36
+        assert scores.get("noise", 0) == 0
+        assert bucket_mgr.calc_topic_scores("你会想到什么", [noise, dog]) == {}
+
+    def test_short_cjk_body_exact_match_keeps_single_character_recall(self, bucket_mgr):
+        bucket = {
+            "content": "这里记录了犬类训练设定和角色称呼。",
+            "metadata": {
+                "name": "犬类训练设定",
+                "domain": ["宠物"],
+                "tags": [],
+            },
+        }
+
+        assert bucket_mgr._calc_topic_score("犬", bucket) >= 0.36
+
+    def test_three_char_cjk_topic_allows_multi_character_evidence(self, bucket_mgr):
+        bucket = {
+            "id": "toilet",
+            "content": "3D打印电便收集器正式上岗，实测效果不错。",
+            "metadata": {
+                "name": "电便收集器实测",
+                "domain": [],
+                "tags": [],
+            },
+        }
+
+        assert bucket_mgr._calc_topic_score("集便器", bucket) >= 0.36
+
     @pytest.mark.asyncio
     async def test_resolved_bucket_penalized_in_normalized(self, populated_env):
         """Resolved buckets get ×0.3 in normalized score (breath-debug logic)."""
