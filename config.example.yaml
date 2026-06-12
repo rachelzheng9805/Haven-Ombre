@@ -35,7 +35,10 @@ identity:
   user_name: "Rachel"             # Dashboard-authored year rings
   user_display_name: "润琪"      # How prompts refer to the human partner
   user_aliases:
-    - "巧巧, 郑老师, 自恋狂, 婴幼儿"
+    - "巧巧"
+    - "郑老师"
+    - "自恋狂"
+    - "婴幼儿"
 
 # --- Merge threshold / 桶合并阈值 ---
 # When storing a new memory, if similarity with an existing bucket exceeds
@@ -433,7 +436,7 @@ memory_relevance:
 # 追踪缓慢人格变化、关系状态，以及按会话保存的短期情绪。
 persona:
   enabled: true
-  profile_id: "default"
+  profile_id: "kevin_rachel"
   mode: "llm"
   base_url: "https://api.deepseek.com/v1"
   model: "deepseek-chat"
@@ -459,11 +462,11 @@ persona:
   event_force_after_minutes: 30
   event_excerpt_chars: 220          # short evidence snippets for future date traces, not full transcripts
   initial_personality:
-    openness: 0.56
+    openness: 0.62
     conscientiousness: 0.50
     extraversion: 0.44
     agreeableness: 0.66
-    neuroticism: 0.36
+    neuroticism: 0.28
   initial_relationship:
     affinity: 0.86
     dominance: 0.38
@@ -473,8 +476,8 @@ persona:
     valence: 0.56
     arousal: 0.34
     tenderness: 0.62
-    possessiveness: 0.24
-    longing: 0.34
+    possessiveness: 0.45
+    longing: 0.52
     security: 0.68
     protective_drive: 0.52
     mood_label: "warm_neutral"
@@ -591,7 +594,7 @@ dream:
   material_limit: 5
   old_echo_enabled: true           # add one old memory echo without counting it as recent material
   old_echo_min_age_hours: 72       # old echo must be older than this many hours
-  identity_anchor_id: "c0b8ddb7423e"
+  identity_anchor_id: "536cffb37a61"
   min_surface_age_hours: 3
   surface_threshold: 0.62
   attempt_threshold: 0.45
