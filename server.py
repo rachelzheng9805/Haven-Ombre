@@ -10593,6 +10593,12 @@ if __name__ == "__main__":
             protected_hosts=OMBRE_CHATGPT_OAUTH_PROTECTED_HOSTS,
         )
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
+        
+        # ====== 暴露欲望可视化面板 ======
+        from desire.desire_bridge import expose_desire_dashboard
+        expose_desire_dashboard(mcp)
+        # ===============================
+
         if OMBRE_CHATGPT_OAUTH.enabled:
             logger.info(
                 "ChatGPT OAuth enabled for Ombre MCP / 已启用 ChatGPT OAuth: protected_hosts=%s",
