@@ -168,8 +168,58 @@ def expose_desire_dashboard(app) -> None:
     async def serve_js(request):
         return FileResponse(os.path.join(base_dir, "index.js"))
 
+    # 面板的交互 API
+    async def api_tick(request):
+        try:
+            from .heartbeat import full_tick
+            state = _get_state()
+            summary = full_tick(state, _data_path)
+            return JSONResponse(summary)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def api_feed(request):
+        try:
+            from .desire import feed_thought
+            from .state import save_state
+            data = await request.json()
+            state = _get_state()
+            feed_thought(state, data.get('text', ''), data.get('drive', ''), data.get('kind', 'flit'), float(data.get('strength', 0.6)))
+            save_state(state, _data_path)
+            return JSONResponse({"ok": True, "thought_count": len(state.thoughts)})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def api_satisfy(request):
+        try:
+            from .desire import satisfy
+            from .state import save_state
+            data = await request.json()
+            state = _get_state()
+            satisfy(state, data.get('action', 'none'))
+            save_state(state, _data_path)
+            return JSONResponse({"ok": True, "drive": state.drive})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def api_gate(request):
+        try:
+            data = await request.json()
+            gate_name = data.get('gate_name')
+            enabled = data.get('enabled', False)
+            import os
+            os.environ[gate_name] = '1' if enabled else ''
+            return JSONResponse({"ok": True, "gate": gate_name, "enabled": enabled})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     # 显式注册路由，兼容所有 ASGI App (FastAPI / Starlette)
     app.add_route("/api/desire/state", get_desire_state, methods=["GET"])
     app.add_route("/desire", serve_dashboard, methods=["GET"])
     app.add_route("/desire/index.css", serve_css, methods=["GET"])
     app.add_route("/desire/index.js", serve_js, methods=["GET"])
+    
+    app.add_route("/api/desire/tick", api_tick, methods=["POST"])
+    app.add_route("/api/desire/feed", api_feed, methods=["POST"])
+    app.add_route("/api/desire/satisfy", api_satisfy, methods=["POST"])
+    app.add_route("/api/desire/gate", api_gate, methods=["POST"])
