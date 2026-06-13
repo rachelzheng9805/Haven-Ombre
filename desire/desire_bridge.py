@@ -143,7 +143,6 @@ def expose_desire_dashboard(app) -> None:
     import os
 
     # 供面板查询当前数据
-    @app.get("/api/desire/state")
     async def get_desire_state(request):
         try:
             state = _get_state()
@@ -154,14 +153,17 @@ def expose_desire_dashboard(app) -> None:
     # 静态文件服务
     base_dir = os.path.dirname(os.path.abspath(__file__))
     
-    @app.get("/desire")
     async def serve_dashboard(request):
         return FileResponse(os.path.join(base_dir, "index.html"))
 
-    @app.get("/desire/index.css")
     async def serve_css(request):
         return FileResponse(os.path.join(base_dir, "index.css"))
 
-    @app.get("/desire/index.js")
     async def serve_js(request):
         return FileResponse(os.path.join(base_dir, "index.js"))
+
+    # 显式注册路由，兼容所有 ASGI App (FastAPI / Starlette)
+    app.add_route("/api/desire/state", get_desire_state, methods=["GET"])
+    app.add_route("/desire", serve_dashboard, methods=["GET"])
+    app.add_route("/desire/index.css", serve_css, methods=["GET"])
+    app.add_route("/desire/index.js", serve_js, methods=["GET"])
