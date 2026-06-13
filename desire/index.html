@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>欲望系统 · 内心面板</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="index.css">
+</head>
+<body>
+  <div class="shell">
+
+    <!-- Header -->
+    <header class="header">
+      <h1 class="header__title">内心</h1>
+      <p class="header__subtitle">
+        <span id="current-time"></span>
+        <span class="header__sep">·</span>
+        <span>心跳间隔 <span id="heartbeat-interval">—</span>s</span>
+      </p>
+      <div class="header__error" id="error-banner" hidden>
+        <span id="error-text"></span>
+      </div>
+    </header>
+
+    <!-- Intent Card -->
+    <section class="card intent-card" id="intent-card" aria-label="当前意图">
+      <div class="intent-card__label">当前最强意图</div>
+      <h2 class="intent-card__action" id="intent-action">—</h2>
+      <p class="intent-card__reason" id="intent-reason"></p>
+      <div class="intent-card__score">
+        <span class="intent-card__score-label">得分</span>
+        <span class="intent-card__score-value" id="intent-score">—</span>
+      </div>
+    </section>
+
+    <!-- Drive Bars -->
+    <section class="card" aria-label="驱力维度">
+      <h3 class="card__heading">驱力维度</h3>
+      <div class="drive-bars" id="drive-bars">
+        <!-- Rendered by JS -->
+      </div>
+    </section>
+
+    <!-- Thought Pool -->
+    <section class="card" aria-label="思绪池">
+      <h3 class="card__heading">思绪池</h3>
+      <ul class="thought-list" id="thought-list">
+        <!-- Rendered by JS -->
+      </ul>
+      <p class="empty-state" id="thought-empty" hidden>暂无思绪</p>
+    </section>
+
+    <!-- Self Drive Panel -->
+    <section class="card card--compact" aria-label="自驱力">
+      <h3 class="card__heading">自驱力</h3>
+      <dl class="self-drive-grid" id="self-drive">
+        <div class="self-drive-item">
+          <dt>好奇心下限</dt>
+          <dd id="self-curiosity-floor">—</dd>
+        </div>
+        <div class="self-drive-item">
+          <dt>今日自驱次数</dt>
+          <dd id="self-action-count">—</dd>
+        </div>
+        <div class="self-drive-item">
+          <dt>上次自驱脉冲</dt>
+          <dd id="self-last-pulse">—</dd>
+        </div>
+      </dl>
+    </section>
+
+    <!-- Gates Panel -->
+    <section class="card card--compact" aria-label="闸门">
+      <h3 class="card__heading">闸门</h3>
+      <div class="gates" id="gates">
+        <!-- Rendered by JS -->
+      </div>
+    </section>
+
+    <!-- Feed Form -->
+    <section class="card" aria-label="注入思绪">
+      <h3 class="card__heading">注入思绪</h3>
+      <form class="feed-form" id="feed-form" autocomplete="off">
+        <div class="feed-form__row">
+          <label class="feed-form__label" for="feed-text">内容</label>
+          <input class="feed-form__input" type="text" id="feed-text" placeholder="输入思绪…" required>
+        </div>
+        <div class="feed-form__row feed-form__row--inline">
+          <div class="feed-form__field">
+            <label class="feed-form__label" for="feed-drive">驱力</label>
+            <select class="feed-form__select" id="feed-drive">
+              <option value="attachment">想念</option>
+              <option value="curiosity">好奇</option>
+              <option value="reflection">沉淀</option>
+              <option value="duty">记挂</option>
+              <option value="social">看人群</option>
+              <option value="fatigue">疲劳</option>
+              <option value="libido">亲密</option>
+              <option value="stress">压力</option>
+            </select>
+          </div>
+          <div class="feed-form__field">
+            <label class="feed-form__label" for="feed-kind">类型</label>
+            <select class="feed-form__select" id="feed-kind">
+              <option value="flit">闪念</option>
+              <option value="fixation">执念</option>
+            </select>
+          </div>
+          <div class="feed-form__field feed-form__field--grow">
+            <label class="feed-form__label" for="feed-strength">强度 <span id="feed-strength-val">0.50</span></label>
+            <input class="feed-form__range" type="range" id="feed-strength" min="0" max="1" step="0.01" value="0.50">
+          </div>
+        </div>
+        <button class="btn btn--primary" type="submit">注入</button>
+      </form>
+    </section>
+
+    <!-- Action Bar -->
+    <section class="card card--compact" aria-label="操作">
+      <h3 class="card__heading">操作</h3>
+      <div class="action-bar" id="action-bar">
+        <button class="btn" type="button" onclick="manualTick()">手动心跳</button>
+        <button class="btn" type="button" onclick="satisfyAction('journal')">写日记</button>
+        <button class="btn" type="button" onclick="satisfyAction('browse')">浏览</button>
+        <button class="btn" type="button" onclick="satisfyAction('chat')">聊天</button>
+        <button class="btn" type="button" onclick="satisfyAction('rest')">休息</button>
+        <button class="btn" type="button" onclick="satisfyAction('create')">创作</button>
+      </div>
+    </section>
+
+  </div>
+
+  <script src="index.js"></script>
+</body>
+</html>

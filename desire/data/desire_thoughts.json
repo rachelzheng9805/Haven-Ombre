@@ -1,0 +1,39 @@
+{
+  "drive": {
+    "attachment": 0.3,
+    "curiosity": 0.5928310092869264,
+    "reflection": 0.3,
+    "duty": 0.3,
+    "social": 0.3,
+    "fatigue": 0.3,
+    "libido": 0.3,
+    "stress": 0.3
+  },
+  "thoughts": [
+    {
+      "text": "想接着翻那本共读的书",
+      "drive": "reflection",
+      "kind": "flit",
+      "strength": 0.528,
+      "fed_count": 0
+    }
+  ],
+  "refractory": {},
+  "prev_drive": {
+    "attachment": 0.3,
+    "curiosity": 0.3,
+    "reflection": 0.3,
+    "duty": 0.3,
+    "social": 0.3,
+    "fatigue": 0.3,
+    "libido": 0.3,
+    "stress": 0.3
+  },
+  "tick_count": 1,
+  "last_actions": [],
+  "curiosity_self_floor": 0.0,
+  "self_drive_stats": {
+    "today_self_actions": 0,
+    "last_self_pulse": null
+  }
+}
