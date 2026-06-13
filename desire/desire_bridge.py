@@ -147,9 +147,38 @@ def expose_desire_dashboard(app) -> None:
     # 供面板查询当前数据
     async def get_desire_state(request):
         try:
-            from .state import _state_to_dict
+            from .desire import compute_scores, pick_intent
+            from .heartbeat import compute_heartbeat_interval
+            from .config import gate, GATE_DESIRE_DRIVEN, GATE_COUPLING, GATE_BASELINE_DRIFT, GATE_HEARTBEAT_AUTONOMY, GATE_SELF_DRIVE
             state = _get_state()
-            return JSONResponse(_state_to_dict(state))
+            scores = compute_scores(state)
+            intent = pick_intent(state)
+            interval = compute_heartbeat_interval(state)
+            
+            response_data = {
+                'drive': state.drive,
+                'scores': scores,
+                'intent': intent,
+                'thoughts': [t.to_dict() for t in state.thoughts],
+                'thought_count': len(state.thoughts),
+                'refractory': state.refractory,
+                'tick_count': state.tick_count,
+                'heartbeat_interval': round(interval, 1) if interval else 0.0,
+                'self_drive': {
+                    'enabled': gate(GATE_SELF_DRIVE),
+                    'curiosity_self_floor': round(state.curiosity_self_floor, 4),
+                    'today_self_actions': state.self_drive_stats.get('today_self_actions', 0),
+                    'last_self_pulse': state.self_drive_stats.get('last_self_pulse'),
+                },
+                'gates': {
+                    GATE_DESIRE_DRIVEN: gate(GATE_DESIRE_DRIVEN),
+                    GATE_COUPLING: gate(GATE_COUPLING),
+                    GATE_BASELINE_DRIFT: gate(GATE_BASELINE_DRIFT),
+                    GATE_HEARTBEAT_AUTONOMY: gate(GATE_HEARTBEAT_AUTONOMY),
+                    GATE_SELF_DRIVE: gate(GATE_SELF_DRIVE),
+                },
+            }
+            return JSONResponse(response_data)
         except Exception as e:
             import traceback
             logger.error(f"Error in get_desire_state: {e}")
