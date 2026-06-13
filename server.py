@@ -10596,7 +10596,7 @@ if __name__ == "__main__":
         
         # ====== 暴露欲望可视化面板 ======
         from desire.desire_bridge import expose_desire_dashboard
-        expose_desire_dashboard(mcp)
+        expose_desire_dashboard(_app)
         # ===============================
 
         if OMBRE_CHATGPT_OAUTH.enabled:
