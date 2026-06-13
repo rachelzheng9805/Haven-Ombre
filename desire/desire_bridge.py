@@ -17,8 +17,10 @@ def _get_state() -> DesireState:
     global _state
     if _state is None:
         if not _data_path:
-            raise ValueError("Desire Engine uninitialized. Call start_engine(data_path) first.")
-        _state = load_state(_data_path)
+            start_engine()
+        else:
+            from .state import load_state
+            _state = load_state(_data_path)
     return _state
 
 async def _heartbeat_loop() -> None:
@@ -145,11 +147,14 @@ def expose_desire_dashboard(app) -> None:
     # 供面板查询当前数据
     async def get_desire_state(request):
         try:
-            from dataclasses import asdict
+            from .state import _state_to_dict
             state = _get_state()
-            return JSONResponse(asdict(state))
+            return JSONResponse(_state_to_dict(state))
         except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+            import traceback
+            logger.error(f"Error in get_desire_state: {e}")
+            logger.error(traceback.format_exc())
+            return JSONResponse({"error": str(e), "trace": traceback.format_exc()}, status_code=500)
 
     # 静态文件服务
     base_dir = os.path.dirname(os.path.abspath(__file__))
