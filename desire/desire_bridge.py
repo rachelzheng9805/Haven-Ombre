@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import List
+from typing import List, Any
 
 from .state import load_state, save_state, DesireState
 from .heartbeat import compute_heartbeat_interval, full_tick
@@ -79,11 +79,24 @@ def build_desire_prompt_block() -> str:
         logger.error(f"Error building desire prompt: {e}")
         return ""
 
-async def process_agent_response(response_text: str, tool_names: List[str]) -> None:
+async def process_agent_response(response_text: Any, tool_names: List[str]) -> None:
     """
     在 LLM 回复结束后调用，分析是否达成了当前的欲望，如果达成则回落并喂养念头。
     """
     try:
+        # 安全处理: 将可能是 None 或 dict 的 response_text 转为纯文本字符串
+        if response_text is None:
+            response_text = ""
+        elif isinstance(response_text, dict):
+            # 尝试从常见格式中提取文本，如果提取不到直接 str() 序列化
+            content = response_text.get("content", "")
+            if isinstance(content, list):
+                response_text = " ".join(block.get("text", "") for block in content if isinstance(block, dict))
+            else:
+                response_text = str(response_text)
+        else:
+            response_text = str(response_text)
+            
         state = _get_state()
         intent = pick_intent(state)
         if not intent:
