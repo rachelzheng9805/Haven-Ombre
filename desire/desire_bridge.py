@@ -131,3 +131,37 @@ async def process_agent_response(response_text: Any, tool_names: List[str]) -> N
             logger.info(f"Desire Action Satisfied: {action} ({drive})")
     except Exception as e:
         logger.error(f"Error processing agent response for desire: {e}")
+
+def expose_desire_dashboard(mcp) -> None:
+    """
+    一行代码将面板暴露到 Haven-Ombre 的公网上。
+    用法: 在 server.py 的最下方，写:
+    from desire.desire_bridge import expose_desire_dashboard
+    expose_desire_dashboard(mcp)
+    """
+    from starlette.responses import JSONResponse, FileResponse
+    import os
+
+    # 供面板查询当前数据
+    @mcp.custom_route("/api/desire/state", methods=["GET"])
+    async def get_desire_state(request):
+        try:
+            state = _get_state()
+            return JSONResponse(state.model_dump() if hasattr(state, 'model_dump') else state.__dict__)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    # 静态文件服务
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    @mcp.custom_route("/desire", methods=["GET"])
+    async def serve_dashboard(request):
+        return FileResponse(os.path.join(base_dir, "index.html"))
+
+    @mcp.custom_route("/desire/index.css", methods=["GET"])
+    async def serve_css(request):
+        return FileResponse(os.path.join(base_dir, "index.css"))
+
+    @mcp.custom_route("/desire/index.js", methods=["GET"])
+    async def serve_js(request):
+        return FileResponse(os.path.join(base_dir, "index.js"))
