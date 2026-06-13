@@ -145,8 +145,9 @@ def expose_desire_dashboard(app) -> None:
     # 供面板查询当前数据
     async def get_desire_state(request):
         try:
+            from dataclasses import asdict
             state = _get_state()
-            return JSONResponse(state.model_dump() if hasattr(state, 'model_dump') else state.__dict__)
+            return JSONResponse(asdict(state))
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
