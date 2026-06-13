@@ -1721,6 +1721,16 @@ class GatewayService:
                 suppressed_buckets=suppressed_buckets,
                 query_planner_debug=query_planner_debug,
             )
+        # ====== 欲望引擎注入开始 ======
+        from desire.desire_bridge import build_desire_prompt_block
+        desire_prompt = build_desire_prompt_block()
+        if desire_prompt:
+            # Haven-Ombre 此时的 payload 叫 forward_payload
+            # 我们直接追加到它的 system 字段末尾
+            if "system" in forward_payload:
+                forward_payload["system"] += f"\n\n{desire_prompt}"
+        # ====== 欲望引擎注入结束 ======
+        
         return forward_payload, injected_ids
 
     def _apply_prompt_cache_hints(self, payload: dict[str, Any], session_id: str) -> None:
@@ -2865,6 +2875,13 @@ class GatewayService:
         assistant_message: dict[str, Any] | None,
         recalled_ids: list[str],
     ) -> None:
+        
+        # ====== 欲望引擎结算开始 ======
+        import asyncio
+        from desire.desire_bridge import process_agent_response
+        asyncio.create_task(process_agent_response(assistant_message, []))
+        # ====== 欲望引擎结算结束 ======
+        
         if not self.persona_engine.enabled:
             logger.info(
                 "Persona post-reply update skipped | session=%s reason=disabled",
