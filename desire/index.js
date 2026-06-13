@@ -345,10 +345,99 @@ function formatTime(ts) {
   }
 }
 
+/* === Chat Logic === */
+let chatMessages = [];
+
+function saveChatHistory() {
+  localStorage.setItem('desire_chat_history', JSON.stringify(chatMessages));
+}
+
+function loadChatHistory() {
+  const saved = localStorage.getItem('desire_chat_history');
+  if (saved) {
+    try {
+      chatMessages = JSON.parse(saved);
+      const history = $id('chat-history');
+      // Clear the dummy default message
+      history.innerHTML = '';
+      chatMessages.forEach(msg => {
+        // Render existing messages
+        const role = msg.role === 'assistant' ? 'ai' : msg.role;
+        appendChatBubble(role, msg.content, false); // false = don't scroll on every single load
+      });
+      history.scrollTop = history.scrollHeight;
+    } catch (e) {
+      console.error('Failed to load chat history', e);
+    }
+  }
+}
+
+function clearChatHistory() {
+  chatMessages = [];
+  localStorage.removeItem('desire_chat_history');
+  const history = $id('chat-history');
+  history.innerHTML = `
+    <div class="chat-bubble chat-bubble--ai">
+      <div class="chat-bubble__content">记忆已清空。我是你的具身智能体。我的潜意识正在深处涌动...</div>
+    </div>
+  `;
+}
+
+function appendChatBubble(role, content, autoScroll = true) {
+  const history = $id('chat-history');
+  const bubble = document.createElement('div');
+  bubble.className = `chat-bubble chat-bubble--${role}`;
+  const bubbleContent = document.createElement('div');
+  bubbleContent.className = 'chat-bubble__content';
+  bubbleContent.textContent = content;
+  bubble.appendChild(bubbleContent);
+  history.appendChild(bubble);
+  if (autoScroll) {
+    history.scrollTop = history.scrollHeight;
+  }
+}
+
+async function sendChatMessage() {
+  const input = $id('chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+
+  // Add user message
+  appendChatBubble('user', text);
+  chatMessages.push({ role: 'user', content: text });
+  saveChatHistory();
+  
+  input.value = '';
+  input.disabled = true;
+  input.placeholder = "思考与调用工具中...";
+
+  try {
+    const res = await apiFetch('/api/desire/chat', {
+      method: 'POST',
+      body: JSON.stringify({ messages: chatMessages })
+    });
+    
+    // Add AI message
+    appendChatBubble('ai', res.reply);
+    chatMessages.push({ role: 'assistant', content: res.reply });
+    saveChatHistory();
+    
+    // Auto-refresh the dashboard state after reply to see changes instantly
+    fetchState();
+  } catch (err) {
+    showError(`聊天失败: ${err.message}`);
+  } finally {
+    input.disabled = false;
+    input.placeholder = "输入你想说的话...";
+    input.focus();
+  }
+}
+
 /* === Init === */
 function init() {
   buildDriveBars();
   renderGates(null);
+  loadChatHistory();
 
   // Strength slider live value
   const slider = $id('feed-strength');
@@ -363,6 +452,15 @@ function init() {
     feedThought();
   });
 
+  // Chat form
+  const chatForm = $id('chat-form');
+  if (chatForm) {
+    chatForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      sendChatMessage();
+    });
+  }
+
   // Initial fetch
   fetchState();
 
@@ -371,3 +469,4 @@ function init() {
 }
 
 document.addEventListener('DOMContentLoaded', init);
+

@@ -125,6 +125,8 @@ def _sync_call_deepseek(text: str, action: str) -> str:
         logger.warning(f"DeepSeek API failed: {e}")
         return ""
 
+
+
 async def _summarize_thought_with_deepseek(text: str, action: str) -> str:
     import asyncio
     try:
@@ -192,7 +194,7 @@ async def process_agent_response(response_text: Any, tool_names: List[str]) -> N
     except Exception as e:
         logger.error(f"Error processing agent response for desire: {e}")
 
-def expose_desire_dashboard(app) -> None:
+def expose_desire_dashboard(app, cli_callback=None) -> None:
     """
     一行代码将面板暴露到 Haven-Ombre 的公网上。
     用法: 在 server.py 的最下方，写:
@@ -300,6 +302,47 @@ def expose_desire_dashboard(app) -> None:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def api_chat(request):
+        try:
+            import asyncio
+            data = await request.json()
+            messages = data.get('messages', [])
+            
+            # 提取最后一条用户发的消息
+            user_text = ""
+            if messages and messages[-1].get("role") == "user":
+                user_text = messages[-1].get("content", "")
+            
+            # 1. 搭便车：组装带有潜意识和节拍铁律的前缀
+            desire_prompt = build_desire_prompt_block()
+            full_user_message = user_text
+            if desire_prompt:
+                full_user_message = f"【内部潜意识与情绪状态】\n{desire_prompt}\n\n【用户输入】\n{user_text}"
+            
+            # 2. 丢给外部的 CLI Callback 进行处理
+            final_reply = ""
+            used_tool_names = []
+            
+            if cli_callback:
+                result = await cli_callback(full_user_message)
+                if isinstance(result, dict):
+                    final_reply = result.get("reply", "")
+                    used_tool_names = result.get("tool_names", [])
+                else:
+                    final_reply = str(result)
+            else:
+                final_reply = "系统未连接到真实的 CLI 网关 (cli_callback is None)。这只是一条测试回复。"
+            
+            # 3. 结算与反哺 (后台执行)
+            asyncio.create_task(process_agent_response(final_reply, used_tool_names))
+            
+            return JSONResponse({"ok": True, "reply": final_reply})
+        except Exception as e:
+            import traceback
+            logger.error(f"Chat API Error: {e}")
+            logger.error(traceback.format_exc())
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     # 显式注册路由，兼容所有 ASGI App (FastAPI / Starlette)
     app.add_route("/api/desire/state", get_desire_state, methods=["GET"])
     app.add_route("/desire", serve_dashboard, methods=["GET"])
@@ -310,3 +353,4 @@ def expose_desire_dashboard(app) -> None:
     app.add_route("/api/desire/feed", api_feed, methods=["POST"])
     app.add_route("/api/desire/satisfy", api_satisfy, methods=["POST"])
     app.add_route("/api/desire/gate", api_gate, methods=["POST"])
+    app.add_route("/api/desire/chat", api_chat, methods=["POST"])

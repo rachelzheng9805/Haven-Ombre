@@ -10,7 +10,9 @@
   <link rel="stylesheet" href="/desire/index.css">
 </head>
 <body>
-  <div class="shell">
+  <div class="app-container">
+    <!-- 左侧/底层：监控面板 -->
+    <div class="dashboard-panel shell">
 
     <!-- Header -->
     <header class="header">
@@ -130,8 +132,28 @@
         <button class="btn" type="button" onclick="satisfyAction('vent')">倾听发泄</button>
       </div>
     </section>
+    </div> <!-- end dashboard-panel -->
 
-  </div>
+    <!-- 右侧/顶层：聊天界面 -->
+    <div class="chat-panel">
+      <header class="chat-header" style="display: flex; justify-content: space-between; align-items: center;">
+        <h2>意识流对话</h2>
+        <button type="button" class="btn" style="padding: 4px 8px; font-size: 0.75rem;" onclick="clearChatHistory()">清空记忆</button>
+      </header>
+      <div class="chat-history" id="chat-history">
+        <div class="chat-bubble chat-bubble--ai">
+          <div class="chat-bubble__content">我是你的具身智能体。我的潜意识正在深处涌动...</div>
+        </div>
+      </div>
+      <div class="chat-input-area">
+        <form id="chat-form" class="chat-form" autocomplete="off">
+          <input type="text" id="chat-input" class="chat-form__input" placeholder="输入你想说的话..." required>
+          <button type="submit" class="btn btn--primary chat-form__submit">发送</button>
+        </form>
+      </div>
+    </div> <!-- end chat-panel -->
+
+  </div> <!-- end app-container -->
 
   <script src="/desire/index.js"></script>
 </body>

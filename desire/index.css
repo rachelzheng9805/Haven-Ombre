@@ -53,14 +53,25 @@ body {
   border-radius: 4px;
 }
 
-/* === Shell === */
-.shell {
+/* === App Container (Dual Pane) === */
+.app-container {
+  display: flex;
+  flex-direction: row;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* === Dashboard Panel === */
+.dashboard-panel {
+  flex: 1;
   max-width: 640px;
-  margin: 0 auto;
+  overflow-y: auto;
   padding: 32px 20px 64px;
   display: flex;
   flex-direction: column;
   gap: 16px;
+  border-right: 1px solid var(--border);
 }
 
 /* === Header === */
@@ -493,5 +504,118 @@ body {
   .drive-row {
     grid-template-columns: 48px 1fr 38px;
     gap: 6px;
+  }
+}
+
+/* === Chat Panel === */
+.chat-panel {
+  flex: 1.5;
+  display: flex;
+  flex-direction: column;
+  background: #111114;
+}
+
+.chat-header {
+  padding: 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+}
+.chat-header h2 {
+  font-size: 1.1rem;
+  font-weight: 500;
+  color: var(--text-bright);
+}
+
+.chat-history {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.chat-bubble {
+  max-width: 80%;
+  display: flex;
+}
+
+.chat-bubble--ai {
+  align-self: flex-start;
+}
+
+.chat-bubble--user {
+  align-self: flex-end;
+}
+
+.chat-bubble__content {
+  padding: 12px 16px;
+  border-radius: 16px;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.chat-bubble--ai .chat-bubble__content {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-bottom-left-radius: 4px;
+}
+
+.chat-bubble--user .chat-bubble__content {
+  background: var(--c-curiosity);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+
+.chat-input-area {
+  padding: 16px 20px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+
+.chat-form {
+  display: flex;
+  gap: 12px;
+}
+
+.chat-form__input {
+  flex: 1;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  padding: 0 16px;
+  color: var(--text-bright);
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.chat-form__input:focus {
+  border-color: var(--c-curiosity);
+}
+
+.chat-form__submit {
+  border-radius: 24px;
+  padding: 0 24px;
+}
+
+/* === Mobile Responsive === */
+@media (max-width: 900px) {
+  .app-container {
+    flex-direction: column;
+    height: 100vh;
+  }
+  
+  .dashboard-panel {
+    flex: 0.4;
+    max-width: 100%;
+    border-right: none;
+    border-bottom: 2px solid var(--border);
+    padding: 16px 16px 32px;
+  }
+  
+  .chat-panel {
+    flex: 0.6;
   }
 }
