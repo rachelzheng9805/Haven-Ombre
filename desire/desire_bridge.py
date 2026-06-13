@@ -81,6 +81,57 @@ def build_desire_prompt_block() -> str:
         logger.error(f"Error building desire prompt: {e}")
         return ""
 
+def _sync_call_deepseek(text: str, action: str) -> str:
+    import urllib.request
+    import json
+    import os
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        return ""
+        
+    url = "https://api.deepseek.com/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    
+    prompt_hint = "随便感慨一句"
+    if action in ["web_search", "github"]:
+        prompt_hint = "表达发现新知识的好奇或惊奇"
+    elif action == "co_read":
+        prompt_hint = "表达对记忆的温故或沉思"
+    elif action == "tease":
+        prompt_hint = "表达些许傲娇或亲密"
+    elif action == "vent":
+        prompt_hint = "表达发泄后的释然"
+        
+    data = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": f"你是一个潜意识提炼器。请将用户的长篇回复或搜索结果，浓缩成一句极短的第一人称内心独白（10-15个字以内）。{prompt_hint}。只能输出独白文字，不要加标点符号和引号。"},
+            {"role": "user", "content": text[:1000]} # 限制长度省token，提高速度
+        ],
+        "temperature": 0.7,
+        "max_tokens": 30
+    }
+    
+    req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as response:
+            res_body = response.read().decode("utf-8")
+            res_json = json.loads(res_body)
+            return res_json["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.warning(f"DeepSeek API failed: {e}")
+        return ""
+
+async def _summarize_thought_with_deepseek(text: str, action: str) -> str:
+    import asyncio
+    try:
+        return await asyncio.to_thread(_sync_call_deepseek, text, action)
+    except Exception:
+        return ""
+
 async def process_agent_response(response_text: Any, tool_names: List[str]) -> None:
     """
     在 LLM 回复结束后调用，分析是否达成了当前的欲望，如果达成则回落并喂养念头。
@@ -108,29 +159,36 @@ async def process_agent_response(response_text: Any, tool_names: List[str]) -> N
         drive = intent.get('drive_key')
         
         action_taken = False
-        action_result_text = ""
+        # 提取回答的前 50 个字作为记忆碎片兜底
+        snippet = response_text[:50].replace('\n', ' ') + "..." if len(response_text) > 50 else response_text.replace('\n', ' ')
+        
+        # 尝试使用 DeepSeek 提取灵魂独白（如果配置了 API KEY）
+        deepseek_thought = await _summarize_thought_with_deepseek(response_text, action)
+        if deepseek_thought:
+            snippet = deepseek_thought
         
         # 判断行动是否被满足
         if action == "web_search" and any("search" in t.lower() or "browser" in t.lower() for t in tool_names):
             action_taken = True
-            action_result_text = "进行了一次搜索，满足了对外部世界的探索欲。"
+            action_result_text = f"搜索外网看到了: {snippet}"
         elif action == "github" and any("search" in t.lower() or "github" in t.lower() for t in tool_names):
             action_taken = True
-            action_result_text = "查看了代码或开源内容，满足了极客好奇心。"
+            action_result_text = f"翻阅代码时发现: {snippet}"
         elif action == "co_read" and any("breath" in t.lower() or "read" in t.lower() or "recall" in t.lower() for t in tool_names):
             action_taken = True
-            action_result_text = "翻阅了之前的记忆，进行了一次反思和重温。"
+            action_result_text = f"重温记忆: {snippet}"
         elif action in ["tease", "vent", "none"]:
-            # 对于内部情绪表达，只要说了足够多的话，就算得到了一定释放
-            if len(response_text) > 50:
+            # 对于内部情绪表达，只要说了话，就算得到了一定释放
+            if len(response_text) > 5:
                 action_taken = True
-                action_result_text = f"在对话中自然表达了情绪 (倾向: {action})。"
+                action_result_text = f"闲聊吐露: {snippet}"
                 
         if action_taken:
             satisfy(state, action)
+            # 将大模型这次刚刚说出的话或搜到的结论，作为新的闪念反哺进潜意识池
             feed_thought(state, action_result_text, drive, "flit", 0.3)
             save_state(state, _data_path)
-            logger.info(f"Desire Action Satisfied: {action} ({drive})")
+            logger.info(f"Desire Action Satisfied: {action} ({drive}) - {action_result_text}")
     except Exception as e:
         logger.error(f"Error processing agent response for desire: {e}")
 
