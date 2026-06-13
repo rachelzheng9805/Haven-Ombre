@@ -35,19 +35,31 @@ async def _heartbeat_loop() -> None:
             logger.exception("Desire Engine heartbeat error")
             await asyncio.sleep(60)
 
-def start_engine(data_path: str) -> None:
+def start_engine(data_path: str = None) -> None:
     """初始化并启动欲望引擎心跳"""
     global _data_path, _state, _heartbeat_task
-    _data_path = data_path
+    import os
+    _data_path = data_path or os.environ.get("DESIRE_DATA_PATH", "./data/desire_thoughts.json")
+    
+    # 确保目录存在
+    os.makedirs(os.path.dirname(os.path.abspath(_data_path)), exist_ok=True)
+    
     _state = load_state(_data_path)
     
     if _heartbeat_task is None:
-        _heartbeat_task = asyncio.create_task(_heartbeat_loop())
-        logger.info(f"Desire Engine started with data path: {data_path}")
+        try:
+            loop = asyncio.get_running_loop()
+            _heartbeat_task = loop.create_task(_heartbeat_loop())
+            logger.info(f"Desire Engine heartbeat lazy-started with data path: {_data_path}")
+        except RuntimeError:
+            logger.warning("No running event loop to start Desire Engine heartbeat.")
 
 def build_desire_prompt_block() -> str:
     """获取当前欲望状态，用于注入到 LLM 的 System Prompt"""
     try:
+        if _heartbeat_task is None:
+            start_engine()
+            
         state = _get_state()
         intent = pick_intent(state)
         if not intent:
