@@ -10638,10 +10638,10 @@ async def desire_cli_callback(full_user_message: str) -> dict:
         "tool_names": used_tools,
     }
 
-        # ====== 暴露欲望可视化面板 ======
-        from desire.desire_bridge import expose_desire_dashboard
-        expose_desire_dashboard(_app, cli_callback=desire_cli_callback)
-        # ===============================
+    # ====== 暴露欲望可视化面板 ======
+    from desire.desire_bridge import expose_desire_dashboard
+    expose_desire_dashboard(_app, cli_callback=desire_cli_callback)
+    # ===============================
 
         if OMBRE_CHATGPT_OAUTH.enabled:
             logger.info(
