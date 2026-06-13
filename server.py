@@ -10593,10 +10593,54 @@ if __name__ == "__main__":
             protected_hosts=OMBRE_CHATGPT_OAUTH_PROTECTED_HOSTS,
         )
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
+
+import asyncio
+import json
+
+async def desire_cli_callback(full_user_message: str) -> dict:
+    """
+    接收来自 desire 面板的请求，带上潜意识前缀，通过新进程抛给 Claude CLI
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "claude", "--output-format", "stream-json", "--verbose", "-p", full_user_message,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    
+    final_text_parts = []
+    used_tools = []
+    
+    async for raw_line in proc.stdout:
+        line = raw_line.decode("utf-8").strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
         
+        if event.get("type") == "assistant":
+            # 真实输出路径确实是 message -> content
+            for block in event.get("message", {}).get("content", []):
+                if block.get("type") == "text":
+                    final_text_parts.append(block["text"])
+                elif block.get("type") == "tool_use":
+                    used_tools.append(block["name"])
+        
+        elif event.get("type") == "result":
+            # 这一轮结束，收工
+            break
+    
+    await proc.wait()
+    
+    return {
+        "reply": "".join(final_text_parts),
+        "tool_names": used_tools,
+    }
+
         # ====== 暴露欲望可视化面板 ======
         from desire.desire_bridge import expose_desire_dashboard
-        expose_desire_dashboard(_app)
+        expose_desire_dashboard(_app, cli_callback=desire_cli_callback)
         # ===============================
 
         if OMBRE_CHATGPT_OAUTH.enabled:
