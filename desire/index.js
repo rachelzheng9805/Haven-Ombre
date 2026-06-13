@@ -1,6 +1,7 @@
 /* === Desire Panel · index.js === */
 
-const API = 'http://127.0.0.1:8765';
+// Using relative path for API when integrated into Haven-Ombre
+const API = '';
 
 const DRIVE_COLORS = {
   attachment:  'hsl(340, 40%, 55%)',

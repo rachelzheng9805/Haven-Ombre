@@ -11,14 +11,14 @@ import random
 import logging
 from typing import Any
 
-from config import (
+from .config import (
     DRIVE_KEYS, DRIVE_TO_ACTION, DRIVE_REASONS, ACTION_SATISFY,
     FLIT_DECAY, FIXATION_GROW, FLIT_TO_FIXATION, FIXATION_FEED,
     FIXATION_FEED_GAIN, FIXATION_RESOLVE_FEEDS, DROP_BELOW,
     FIXATION_DRIVE_BOOST, THOUGHT_MAX, FATIGUE_REST_GATE,
     REFRACTORY_TICKS, FREQ_DISCOUNT_WINDOW, FREQ_DISCOUNT_FACTOR,
 )
-from state import DesireState, Thought, clamp_drives
+from .state import DesireState, Thought, clamp_drives
 
 logger = logging.getLogger(__name__)
 

@@ -6,12 +6,12 @@ from __future__ import annotations
 让系统在无外部刺激时也能缓慢"醒来"。
 """
 
-from config import (
+from .config import (
     SELF_DRIVE_PULSE_DELTA, CURIOSITY_SELF_GROW_RATE,
     CURIOSITY_SELF_GROW_CAP, DRIVE_TO_ACTION,
 )
-from state import DesireState, clamp_drives
-from desire import pulse_drive, source_drive_for
+from .state import DesireState, clamp_drives
+from .desire import pulse_drive, source_drive_for
 
 
 def self_experience_pulse(

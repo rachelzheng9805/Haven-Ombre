@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
-from config import DRIVE_KEYS, DRIVE_DEFAULTS
+from .config import DRIVE_KEYS, DRIVE_DEFAULTS
 
 
 # ──────────────────────────────────────────

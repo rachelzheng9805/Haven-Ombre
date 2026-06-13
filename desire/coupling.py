@@ -8,10 +8,10 @@ from __future__ import annotations
 - 全局阻尼：每 tick 向基线回归
 """
 
-from config import (
+from .config import (
     COUPLING_EDGES, COUPLING_DAMPING, DRIVE_BASELINE, DRIVE_KEYS,
 )
-from state import DesireState, clamp_drives
+from .state import DesireState, clamp_drives
 
 
 def apply_coupling(state: DesireState) -> None:
